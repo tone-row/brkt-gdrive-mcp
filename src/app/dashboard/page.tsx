@@ -40,6 +40,7 @@ export default function Dashboard() {
   const [creatingKey, setCreatingKey] = useState(false);
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
   const [keyCopied, setKeyCopied] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   useEffect(() => {
     if (!isPending && !session) {
@@ -88,6 +89,29 @@ export default function Dashboard() {
       provider: "google",
       callbackURL: "/dashboard",
     });
+  };
+
+  const handleDisconnect = async () => {
+    if (!confirm("Are you sure you want to disconnect your Google Drive? This will delete all your indexed documents.")) {
+      return;
+    }
+
+    setDisconnecting(true);
+    try {
+      const res = await fetch("/api/oauth/google", { method: "DELETE" });
+      if (res.ok) {
+        setStatus({ googleConnected: false, documentCount: 0, chunkCount: 0 });
+        setSearchResults(null);
+        setSyncResult(null);
+      } else {
+        const data = await res.json();
+        alert(`Failed to disconnect: ${data.error}`);
+      }
+    } catch (error: any) {
+      alert(`Failed to disconnect: ${error.message}`);
+    } finally {
+      setDisconnecting(false);
+    }
   };
 
   const handleSync = async () => {
@@ -209,8 +233,17 @@ export default function Dashboard() {
               <p className="text-gray-600 text-sm mb-4">
                 Your Google account is connected. You can sync your documents below.
               </p>
-              <div className="inline-block px-4 py-2 bg-green-100 text-green-700 rounded-lg text-sm font-medium">
-                Connected
+              <div className="flex items-center gap-3">
+                <div className="inline-block px-4 py-2 bg-green-100 text-green-700 rounded-lg text-sm font-medium">
+                  Connected
+                </div>
+                <button
+                  onClick={handleDisconnect}
+                  disabled={disconnecting}
+                  className="px-4 py-2 text-red-600 border border-red-300 rounded-lg text-sm hover:bg-red-50 disabled:opacity-50"
+                >
+                  {disconnecting ? "Disconnecting..." : "Disconnect"}
+                </button>
               </div>
             </>
           ) : (
