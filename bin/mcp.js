@@ -1,40 +1,15 @@
+#!/usr/bin/env node
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 
-const API_URL = process.env.GDRIVE_API_URL || "http://localhost:3000";
+const API_URL = process.env.GDRIVE_API_URL || "https://brkt-gdrive-mcp.vercel.app";
 const API_KEY = process.env.GDRIVE_API_KEY;
 
 if (!API_KEY) {
   console.error("Error: GDRIVE_API_KEY environment variable is required");
+  console.error("Get your API key at: https://brkt-gdrive-mcp.vercel.app");
   process.exit(1);
-}
-
-interface SearchResult {
-  document_id: string;
-  document_title: string;
-  chunk_index: number;
-  chunk_text: string;
-  similarity: number;
-}
-
-interface DocumentMetadata {
-  id: string;
-  google_doc_id: string;
-  title: string;
-  google_modified_time: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface Document {
-  id: string;
-  google_doc_id: string;
-  title: string;
-  full_text: string;
-  google_modified_time: string;
-  created_at: string;
-  updated_at: string;
 }
 
 const headers = {
@@ -42,7 +17,7 @@ const headers = {
   "Authorization": `Bearer ${API_KEY}`,
 };
 
-async function search(query: string, limit: number = 10): Promise<SearchResult[]> {
+async function search(query, limit = 10) {
   const response = await fetch(`${API_URL}/api/search`, {
     method: "POST",
     headers,
@@ -58,7 +33,7 @@ async function search(query: string, limit: number = 10): Promise<SearchResult[]
   return data.results;
 }
 
-async function listDocuments(): Promise<DocumentMetadata[]> {
+async function listDocuments() {
   const response = await fetch(`${API_URL}/api/documents`, { headers });
 
   if (!response.ok) {
@@ -70,7 +45,7 @@ async function listDocuments(): Promise<DocumentMetadata[]> {
   return data.documents;
 }
 
-async function getDocument(id: string): Promise<Document> {
+async function getDocument(id) {
   const response = await fetch(`${API_URL}/api/documents/${id}`, { headers });
 
   if (!response.ok) {
@@ -96,16 +71,17 @@ async function main() {
     "search",
     "Semantic search over your Google Drive documents. Returns relevant text chunks with source information.",
     {
-      query: z.string().describe("The search query"),
-      limit: z
-        .number()
-        .min(1)
-        .max(50)
-        .default(10)
-        .describe("Maximum number of results to return"),
+      query: {
+        type: "string",
+        description: "The search query",
+      },
+      limit: {
+        type: "number",
+        description: "Maximum number of results to return (1-50, default 10)",
+      },
     },
-    async ({ query, limit }) => {
-      const results = await search(query, limit);
+    async ({ query, limit = 10 }) => {
+      const results = await search(query, Math.min(Math.max(limit, 1), 50));
 
       if (results.length === 0) {
         return {
@@ -143,6 +119,7 @@ ${r.chunk_text}
   server.tool(
     "list_documents",
     "List all indexed Google Drive documents with metadata (title, last modified, etc).",
+    {},
     async () => {
       const documents = await listDocuments();
 
@@ -179,7 +156,10 @@ ${r.chunk_text}
     "expand_document",
     "Get the full text content of a document by its ID. Use this after searching to get complete document context.",
     {
-      document_id: z.string().describe("The document ID to retrieve"),
+      document_id: {
+        type: "string",
+        description: "The document ID to retrieve",
+      },
     },
     async ({ document_id }) => {
       const doc = await getDocument(document_id);
