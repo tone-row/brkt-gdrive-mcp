@@ -2,6 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 
 const API_URL = process.env.GDRIVE_API_URL || "https://brkt-gdrive-mcp.vercel.app";
 const API_KEY = process.env.GDRIVE_API_KEY;
@@ -71,17 +72,11 @@ async function main() {
     "search",
     "Semantic search over your Google Drive documents. Returns relevant text chunks with source information.",
     {
-      query: {
-        type: "string",
-        description: "The search query",
-      },
-      limit: {
-        type: "number",
-        description: "Maximum number of results to return (1-50, default 10)",
-      },
+      query: z.string().describe("The search query"),
+      limit: z.number().min(1).max(50).default(10).describe("Maximum number of results to return"),
     },
-    async ({ query, limit = 10 }) => {
-      const results = await search(query, Math.min(Math.max(limit, 1), 50));
+    async ({ query, limit }) => {
+      const results = await search(query, limit);
 
       if (results.length === 0) {
         return {
@@ -156,10 +151,7 @@ ${r.chunk_text}
     "expand_document",
     "Get the full text content of a document by its ID. Use this after searching to get complete document context.",
     {
-      document_id: {
-        type: "string",
-        description: "The document ID to retrieve",
-      },
+      document_id: z.string().describe("The document ID to retrieve"),
     },
     async ({ document_id }) => {
       const doc = await getDocument(document_id);
