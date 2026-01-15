@@ -1,6 +1,7 @@
 {
   "name": "brkt-gdrive-mcp",
   "version": "1.0.0",
+  "type": "module",
   "description": "MCP server for semantic search over Google Drive documents",
   "bin": {
     "brkt-gdrive-mcp": "./bin/mcp.js"
