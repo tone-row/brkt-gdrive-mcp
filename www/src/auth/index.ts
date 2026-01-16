@@ -29,6 +29,10 @@ export const auth = betterAuth({
         "profile",
         "https://www.googleapis.com/auth/drive.readonly",
       ],
+      // Request offline access to get a refresh token
+      accessType: "offline",
+      // Force consent screen to always get a refresh token (even on re-auth)
+      prompt: "consent",
     },
   },
   trustedOrigins: [
