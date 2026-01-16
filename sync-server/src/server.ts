@@ -77,6 +77,7 @@ Bun.serve({
     }
 
     // Sync single user endpoint: POST /sync/:userId
+    // This endpoint returns immediately and runs sync in background
     const userSyncMatch = url.pathname.match(/^\/sync\/([^/]+)$/);
     if (userSyncMatch && request.method === "POST") {
       if (!isAuthorized) {
@@ -92,49 +93,28 @@ Bun.serve({
       console.log(`User sync triggered for ${userId} at ${new Date().toISOString()}`);
       console.log(`${"=".repeat(50)}`);
 
-      try {
-        const startTime = Date.now();
-        const result = await syncUserById(userId);
-        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
-        console.log(`User sync completed in ${duration}s`);
-
-        // Check if sync was skipped because already in progress
-        if (result.alreadySyncing) {
-          return new Response(JSON.stringify({
-            success: false,
-            error: "Sync already in progress",
-            message: "A sync is already running for this user. Please wait.",
-            timestamp: new Date().toISOString(),
-          }), {
-            status: 409, // Conflict
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-
-        return new Response(JSON.stringify({
-          success: true,
-          message: "User sync completed successfully",
-          duration: `${duration}s`,
-          ...result,
-          timestamp: new Date().toISOString(),
-        }), {
-          headers: { "Content-Type": "application/json" },
+      // Start sync in background and return immediately
+      // The frontend will poll /api/me/status to check progress
+      syncUserById(userId)
+        .then((result) => {
+          if (result.alreadySyncing) {
+            console.log(`User sync skipped (already in progress)`);
+          } else {
+            console.log(`User sync completed: +${result.added} added, ~${result.updated} updated, -${result.deleted} deleted`);
+          }
+        })
+        .catch((error) => {
+          console.error(`User sync failed: ${error.message}`);
+          console.error(error.stack);
         });
-      } catch (error: any) {
-        console.error(`User sync failed: ${error.message}`);
-        console.error(error.stack);
 
-        return new Response(JSON.stringify({
-          success: false,
-          error: "Sync failed",
-          message: error.message,
-          timestamp: new Date().toISOString(),
-        }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
+      return new Response(JSON.stringify({
+        success: true,
+        message: "Sync started",
+        timestamp: new Date().toISOString(),
+      }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     // 404 for unknown routes

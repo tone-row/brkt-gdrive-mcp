@@ -139,8 +139,9 @@ export default function Dashboard() {
       const res = await fetch("/api/me/sync", { method: "POST" });
       const data = await res.json();
       if (res.ok) {
-        setSyncResult(`Sync complete: +${data.added} added, ~${data.updated} updated, -${data.deleted} deleted`);
-        fetchStatus();
+        // Sync started in background - poll for completion
+        setSyncResult("Syncing...");
+        pollSyncStatus();
       } else if (res.status === 409) {
         // Sync already in progress - start polling
         setSyncResult("Sync already in progress...");
