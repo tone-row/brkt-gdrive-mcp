@@ -300,7 +300,18 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     } catch (error: any) {
       console.error(`  Failed to fetch Google Drive docs: ${error.message}`);
       console.log(`  Preserving ${storedDocs.size} existing documents (no deletions on API failure)`);
-      await markSyncFailed(user.userId, `Failed to fetch Google Drive: ${error.message}`);
+
+      // Check if this is an auth error and mark account for re-auth
+      const isAuthError = error.message?.includes("Invalid Credentials") ||
+                          error.message?.includes("Unauthorized") ||
+                          error.message?.includes("invalid_grant") ||
+                          error.status === 401;
+      if (isAuthError) {
+        await markAccountNeedsReauth(user.userId);
+        await markSyncFailed(user.userId, "Authentication failed - please reconnect Google Drive");
+      } else {
+        await markSyncFailed(user.userId, `Failed to fetch Google Drive: ${error.message}`);
+      }
       return { added: 0, updated: 0, deleted: 0, authFailed: true };
     }
     console.log(`  Found ${driveDocs.length} documents in Google Drive`);
