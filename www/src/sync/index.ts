@@ -1,9 +1,13 @@
 import { db } from "../db/client";
 import { runMigrations } from "../db/schema";
-import { listGoogleDocs, exportDocAsText, type DriveDocument, type GoogleTokens } from "./google-drive";
+import { listGoogleDocs, exportDocAsText, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
 import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
 import { v4 as uuid } from "uuid";
+
+// Safety threshold: if we have more than this many docs in DB but Google returns 0,
+// something is likely wrong - don't delete anything
+const DELETION_SAFETY_THRESHOLD = 5;
 
 interface StoredDocument {
   id: string;
@@ -45,6 +49,42 @@ async function getUsersWithGoogleAccounts(): Promise<UserWithTokens[]> {
         : null,
     },
   }));
+}
+
+/**
+ * Update stored tokens in the database after a refresh
+ */
+async function persistRefreshedTokens(userId: string, tokens: RefreshedTokens): Promise<void> {
+  await db.execute({
+    sql: `UPDATE accounts
+          SET access_token = ?,
+              refresh_token = ?,
+              access_token_expires_at = ?
+          WHERE user_id = ? AND provider_id = 'google'`,
+    args: [
+      tokens.accessToken,
+      tokens.refreshToken,
+      tokens.expiresAt?.toISOString() ?? null,
+      userId,
+    ],
+  });
+  console.log("  Persisted refreshed tokens to database");
+}
+
+/**
+ * Mark a user's Google account as needing re-authentication
+ */
+async function markAccountNeedsReauth(userId: string): Promise<void> {
+  // Clear the access token so the user knows they need to re-auth
+  // but keep refresh token in case it's temporarily invalid
+  await db.execute({
+    sql: `UPDATE accounts
+          SET access_token = NULL,
+              access_token_expires_at = NULL
+          WHERE user_id = ? AND provider_id = 'google'`,
+    args: [userId],
+  });
+  console.log("  Marked account as needing re-authentication");
 }
 
 /**
@@ -195,8 +235,28 @@ async function deleteDocument(storedDoc: StoredDocument): Promise<void> {
 /**
  * Sync a single user's Google Drive documents
  */
-async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number }> {
+async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; authFailed?: boolean }> {
   console.log(`\nSyncing user: ${user.email}`);
+
+  // Step 1: Refresh tokens if needed
+  const refreshedTokens = await refreshTokensIfNeeded(user.tokens);
+  if (!refreshedTokens) {
+    console.error(`  Authentication failed - skipping sync (documents preserved)`);
+    await markAccountNeedsReauth(user.userId);
+    return { added: 0, updated: 0, deleted: 0, authFailed: true };
+  }
+
+  // Persist refreshed tokens if they were updated
+  if (refreshedTokens.wasRefreshed) {
+    await persistRefreshedTokens(user.userId, refreshedTokens);
+  }
+
+  // Use the (potentially refreshed) tokens for API calls
+  const activeTokens: GoogleTokens = {
+    accessToken: refreshedTokens.accessToken,
+    refreshToken: refreshedTokens.refreshToken,
+    expiresAt: refreshedTokens.expiresAt,
+  };
 
   // Get current state from database for this user
   const storedDocs = await getStoredDocuments(user.userId);
@@ -205,11 +265,13 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
   // Get current state from Google Drive
   let driveDocs: DriveDocument[];
   try {
-    driveDocs = await listGoogleDocs(user.tokens);
+    driveDocs = await listGoogleDocs(activeTokens);
   } catch (error: any) {
     console.error(`  Failed to fetch Google Drive docs: ${error.message}`);
-    // TODO: Mark account as needing re-auth if token expired
-    return { added: 0, updated: 0, deleted: 0 };
+    // CRITICAL: Do NOT delete documents when we can't reach Google
+    // This preserves user data even when auth fails mid-sync
+    console.log(`  Preserving ${storedDocs.size} existing documents (no deletions on API failure)`);
+    return { added: 0, updated: 0, deleted: 0, authFailed: true };
   }
   console.log(`  Found ${driveDocs.length} documents in Google Drive`);
 
@@ -222,6 +284,23 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     if (!driveDocIds.has(googleDocId)) {
       toDelete.push(storedDoc);
     }
+  }
+
+  // SAFETY CHECK: If we have many docs in DB but Google returned 0 or very few,
+  // something is likely wrong (API error, permissions issue, etc.)
+  // Don't delete anything in this case - it's safer to have stale data than no data
+  if (storedDocs.size >= DELETION_SAFETY_THRESHOLD && driveDocs.length === 0) {
+    console.warn(`  ⚠️  SAFETY: Google returned 0 docs but we have ${storedDocs.size} in database`);
+    console.warn(`  ⚠️  Skipping ALL deletions to prevent data loss`);
+    console.warn(`  ⚠️  User may need to re-authenticate or check Google Drive permissions`);
+    // Still process additions/updates but skip deletions
+    toDelete.length = 0;
+  } else if (toDelete.length > storedDocs.size * 0.8 && toDelete.length > DELETION_SAFETY_THRESHOLD) {
+    // If we're about to delete more than 80% of docs and it's more than the threshold,
+    // that's suspicious - might be an API issue
+    console.warn(`  ⚠️  SAFETY: About to delete ${toDelete.length}/${storedDocs.size} docs (${Math.round(toDelete.length / storedDocs.size * 100)}%)`);
+    console.warn(`  ⚠️  This seems excessive - skipping deletions as a safety measure`);
+    toDelete.length = 0;
   }
 
   // Find documents to add or update
@@ -246,12 +325,12 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
 
   // Process additions
   for (const doc of toAdd) {
-    await indexDocument(user.userId, user.tokens, doc);
+    await indexDocument(user.userId, activeTokens, doc);
   }
 
   // Process updates
   for (const { stored, drive } of toUpdate) {
-    await updateDocument(user.userId, user.tokens, stored, drive);
+    await updateDocument(user.userId, activeTokens, stored, drive);
   }
 
   return { added: toAdd.length, updated: toUpdate.length, deleted: toDelete.length };
@@ -312,7 +391,7 @@ export async function syncUserById(userId: string): Promise<{ added: number; upd
         a.access_token_expires_at
       FROM users u
       JOIN accounts a ON u.id = a.user_id
-      WHERE u.id = ? AND a.provider_id = 'google' AND a.access_token IS NOT NULL
+      WHERE u.id = ? AND a.provider_id = 'google'
     `,
     args: [userId],
   });
@@ -322,6 +401,12 @@ export async function syncUserById(userId: string): Promise<{ added: number; upd
   }
 
   const row = result.rows[0]!;
+
+  // Check if account needs re-authentication
+  if (!row.access_token) {
+    throw new Error("Google account needs re-authentication. Please disconnect and reconnect your Google account.");
+  }
+
   const user: UserWithTokens = {
     userId: row.user_id as string,
     email: row.email as string,
