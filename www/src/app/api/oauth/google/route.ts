@@ -13,23 +13,24 @@ export async function DELETE(request: NextRequest) {
   const userId = session.user.id;
 
   try {
-    // Delete user's documents and chunks (chunks cascade delete)
-    await db.execute({
-      sql: "DELETE FROM documents WHERE user_id = ?",
-      args: [userId],
-    });
-
-    // Delete the Google account connection from Better Auth
+    // Only delete the Google account connection - preserve indexed documents
+    // Documents will be re-synced when user reconnects
     await db.execute({
       sql: "DELETE FROM accounts WHERE user_id = ? AND provider_id = 'google'",
       args: [userId],
     });
 
-    console.log(`Disconnected Google account for user ${userId}`);
+    // Also clear sync status so it doesn't show stale errors
+    await db.execute({
+      sql: "DELETE FROM sync_status WHERE user_id = ?",
+      args: [userId],
+    });
+
+    console.log(`Disconnected Google account for user ${userId} (documents preserved)`);
 
     return NextResponse.json({
       success: true,
-      message: "Google Drive disconnected successfully",
+      message: "Google Drive disconnected (your indexed documents are preserved)",
     });
   } catch (error: any) {
     console.error("Failed to disconnect Google account:", error);

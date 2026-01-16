@@ -110,7 +110,7 @@ export default function Dashboard() {
   };
 
   const handleDisconnect = async () => {
-    if (!confirm("Are you sure you want to disconnect your Google Drive? This will delete all your indexed documents.")) {
+    if (!confirm("Disconnect your Google Drive? Your indexed documents will be preserved and you can reconnect anytime.")) {
       return;
     }
 
@@ -118,8 +118,8 @@ export default function Dashboard() {
     try {
       const res = await fetch("/api/oauth/google", { method: "DELETE" });
       if (res.ok) {
-        setStatus({ googleConnected: false, needsReconnect: false, documentCount: 0, chunkCount: 0, syncStatus: null });
-        setSearchResults(null);
+        // Documents are preserved, just update connection status
+        setStatus(prev => prev ? { ...prev, googleConnected: false, needsReconnect: prev.documentCount > 0, syncStatus: null } : null);
         setSyncResult(null);
       } else {
         const data = await res.json();
