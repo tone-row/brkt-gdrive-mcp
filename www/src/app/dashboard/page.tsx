@@ -4,10 +4,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSession, signOut, authClient } from "@/lib/auth-client";
 
+interface SyncStatusInfo {
+  status: "idle" | "syncing" | "failed";
+  startedAt: string | null;
+  completedAt: string | null;
+  lastResult: { added: number; updated: number; deleted: number } | null;
+  error: string | null;
+}
+
 interface UserStatus {
   googleConnected: boolean;
   documentCount: number;
   chunkCount: number;
+  syncStatus: SyncStatusInfo | null;
 }
 
 interface SearchResult {
@@ -55,6 +64,14 @@ export default function Dashboard() {
     }
   }, [session]);
 
+  // Check if sync is already in progress on page load
+  useEffect(() => {
+    if (status?.syncStatus?.status === "syncing" && !syncing) {
+      setSyncing(true);
+      pollSyncStatus();
+    }
+  }, [status?.syncStatus?.status]);
+
   const fetchStatus = async () => {
     try {
       const res = await fetch("/api/me/status");
@@ -100,7 +117,7 @@ export default function Dashboard() {
     try {
       const res = await fetch("/api/oauth/google", { method: "DELETE" });
       if (res.ok) {
-        setStatus({ googleConnected: false, documentCount: 0, chunkCount: 0 });
+        setStatus({ googleConnected: false, documentCount: 0, chunkCount: 0, syncStatus: null });
         setSearchResults(null);
         setSyncResult(null);
       } else {
@@ -123,14 +140,48 @@ export default function Dashboard() {
       if (res.ok) {
         setSyncResult(`Sync complete: +${data.added} added, ~${data.updated} updated, -${data.deleted} deleted`);
         fetchStatus();
+      } else if (res.status === 409) {
+        // Sync already in progress - start polling
+        setSyncResult("Sync already in progress...");
+        pollSyncStatus();
       } else {
         setSyncResult(`Sync failed: ${data.error}`);
+        setSyncing(false);
       }
     } catch (error: any) {
       setSyncResult(`Sync failed: ${error.message}`);
-    } finally {
       setSyncing(false);
     }
+  };
+
+  const pollSyncStatus = async () => {
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/me/status");
+        if (res.ok) {
+          const data = await res.json();
+          setStatus(data);
+
+          if (data.syncStatus?.status === "syncing") {
+            // Still syncing, poll again
+            setTimeout(poll, 2000);
+          } else {
+            // Sync finished
+            setSyncing(false);
+            if (data.syncStatus?.status === "failed") {
+              setSyncResult(`Sync failed: ${data.syncStatus.error}`);
+            } else if (data.syncStatus?.lastResult) {
+              const r = data.syncStatus.lastResult;
+              setSyncResult(`Sync complete: +${r.added} added, ~${r.updated} updated, -${r.deleted} deleted`);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Failed to poll status:", error);
+        setSyncing(false);
+      }
+    };
+    poll();
   };
 
   const handleSearch = async (e: React.FormEvent) => {
@@ -278,12 +329,44 @@ export default function Dashboard() {
                 <span className="text-xs text-gray-500">Chunks</span>
               </div>
             </div>
+
+            {/* Sync Status Info */}
+            {status.syncStatus && (
+              <div className="mb-4 p-3 bg-gray-50 rounded-lg text-sm">
+                {status.syncStatus.status === "syncing" && (
+                  <div className="flex items-center gap-2 text-blue-600">
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    <span>Sync in progress...</span>
+                  </div>
+                )}
+                {status.syncStatus.status === "failed" && status.syncStatus.error && (
+                  <div className="text-red-600">
+                    <span className="font-medium">Last sync failed:</span> {status.syncStatus.error}
+                  </div>
+                )}
+                {status.syncStatus.completedAt && status.syncStatus.status !== "syncing" && (
+                  <div className="text-gray-600">
+                    <span className="font-medium">Last synced:</span>{" "}
+                    {new Date(status.syncStatus.completedAt).toLocaleString()}
+                    {status.syncStatus.lastResult && status.syncStatus.status === "idle" && (
+                      <span className="ml-2 text-gray-500">
+                        (+{status.syncStatus.lastResult.added} ~{status.syncStatus.lastResult.updated} -{status.syncStatus.lastResult.deleted})
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={handleSync}
-              disabled={syncing}
+              disabled={syncing || status.syncStatus?.status === "syncing"}
               className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
             >
-              {syncing ? "Syncing..." : "Sync Now"}
+              {syncing || status.syncStatus?.status === "syncing" ? "Syncing..." : "Sync Now"}
             </button>
             {syncResult && (
               <p className={`mt-3 text-sm ${syncResult.includes("failed") ? "text-red-600" : "text-green-600"}`}>

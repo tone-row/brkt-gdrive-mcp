@@ -3,6 +3,7 @@ import { runMigrations } from "../db/schema";
 import { listGoogleDocs, exportDocAsText, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
 import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
+import { markSyncStarted, markSyncCompleted, markSyncFailed } from "./status";
 import { v4 as uuid } from "uuid";
 
 // Safety threshold: if we have more than this many docs in DB but Google returns 0,
@@ -235,105 +236,123 @@ async function deleteDocument(storedDoc: StoredDocument): Promise<void> {
 /**
  * Sync a single user's Google Drive documents
  */
-async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; authFailed?: boolean }> {
+async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; authFailed?: boolean; alreadySyncing?: boolean }> {
   console.log(`\nSyncing user: ${user.email}`);
 
-  // Step 1: Refresh tokens if needed
-  const refreshedTokens = await refreshTokensIfNeeded(user.tokens);
-  if (!refreshedTokens) {
-    console.error(`  Authentication failed - skipping sync (documents preserved)`);
-    await markAccountNeedsReauth(user.userId);
-    return { added: 0, updated: 0, deleted: 0, authFailed: true };
+  // Check if sync is already in progress for this user
+  const canStart = await markSyncStarted(user.userId);
+  if (!canStart) {
+    console.log(`  Sync already in progress, skipping`);
+    return { added: 0, updated: 0, deleted: 0, alreadySyncing: true };
   }
 
-  // Persist refreshed tokens if they were updated
-  if (refreshedTokens.wasRefreshed) {
-    await persistRefreshedTokens(user.userId, refreshedTokens);
-  }
-
-  // Use the (potentially refreshed) tokens for API calls
-  const activeTokens: GoogleTokens = {
-    accessToken: refreshedTokens.accessToken,
-    refreshToken: refreshedTokens.refreshToken,
-    expiresAt: refreshedTokens.expiresAt,
-  };
-
-  // Get current state from database for this user
-  const storedDocs = await getStoredDocuments(user.userId);
-  console.log(`  Found ${storedDocs.size} documents in database`);
-
-  // Get current state from Google Drive
-  let driveDocs: DriveDocument[];
   try {
-    driveDocs = await listGoogleDocs(activeTokens);
+    // Step 1: Refresh tokens if needed
+    const refreshedTokens = await refreshTokensIfNeeded(user.tokens);
+    if (!refreshedTokens) {
+      console.error(`  Authentication failed - skipping sync (documents preserved)`);
+      await markAccountNeedsReauth(user.userId);
+      await markSyncFailed(user.userId, "Authentication failed - please reconnect Google Drive");
+      return { added: 0, updated: 0, deleted: 0, authFailed: true };
+    }
+
+    // Persist refreshed tokens if they were updated
+    if (refreshedTokens.wasRefreshed) {
+      await persistRefreshedTokens(user.userId, refreshedTokens);
+    }
+
+    // Use the (potentially refreshed) tokens for API calls
+    const activeTokens: GoogleTokens = {
+      accessToken: refreshedTokens.accessToken,
+      refreshToken: refreshedTokens.refreshToken,
+      expiresAt: refreshedTokens.expiresAt,
+    };
+
+    // Get current state from database for this user
+    const storedDocs = await getStoredDocuments(user.userId);
+    console.log(`  Found ${storedDocs.size} documents in database`);
+
+    // Get current state from Google Drive
+    let driveDocs: DriveDocument[];
+    try {
+      driveDocs = await listGoogleDocs(activeTokens);
+    } catch (error: any) {
+      console.error(`  Failed to fetch Google Drive docs: ${error.message}`);
+      // CRITICAL: Do NOT delete documents when we can't reach Google
+      // This preserves user data even when auth fails mid-sync
+      console.log(`  Preserving ${storedDocs.size} existing documents (no deletions on API failure)`);
+      await markSyncFailed(user.userId, `Failed to fetch Google Drive: ${error.message}`);
+      return { added: 0, updated: 0, deleted: 0, authFailed: true };
+    }
+    console.log(`  Found ${driveDocs.length} documents in Google Drive`);
+
+    // Create a set of drive doc IDs for quick lookup
+    const driveDocIds = new Set(driveDocs.map((d) => d.id));
+
+    // Find documents to delete (in database but not in drive)
+    const toDelete: StoredDocument[] = [];
+    for (const [googleDocId, storedDoc] of storedDocs) {
+      if (!driveDocIds.has(googleDocId)) {
+        toDelete.push(storedDoc);
+      }
+    }
+
+    // SAFETY CHECK: If we have many docs in DB but Google returned 0 or very few,
+    // something is likely wrong (API error, permissions issue, etc.)
+    // Don't delete anything in this case - it's safer to have stale data than no data
+    if (storedDocs.size >= DELETION_SAFETY_THRESHOLD && driveDocs.length === 0) {
+      console.warn(`  ⚠️  SAFETY: Google returned 0 docs but we have ${storedDocs.size} in database`);
+      console.warn(`  ⚠️  Skipping ALL deletions to prevent data loss`);
+      console.warn(`  ⚠️  User may need to re-authenticate or check Google Drive permissions`);
+      // Still process additions/updates but skip deletions
+      toDelete.length = 0;
+    } else if (toDelete.length > storedDocs.size * 0.8 && toDelete.length > DELETION_SAFETY_THRESHOLD) {
+      // If we're about to delete more than 80% of docs and it's more than the threshold,
+      // that's suspicious - might be an API issue
+      console.warn(`  ⚠️  SAFETY: About to delete ${toDelete.length}/${storedDocs.size} docs (${Math.round(toDelete.length / storedDocs.size * 100)}%)`);
+      console.warn(`  ⚠️  This seems excessive - skipping deletions as a safety measure`);
+      toDelete.length = 0;
+    }
+
+    // Find documents to add or update
+    const toAdd: DriveDocument[] = [];
+    const toUpdate: { stored: StoredDocument; drive: DriveDocument }[] = [];
+
+    for (const driveDoc of driveDocs) {
+      const storedDoc = storedDocs.get(driveDoc.id);
+      if (!storedDoc) {
+        toAdd.push(driveDoc);
+      } else if (driveDoc.modifiedTime > storedDoc.google_modified_time) {
+        toUpdate.push({ stored: storedDoc, drive: driveDoc });
+      }
+    }
+
+    console.log(`  Sync plan: +${toAdd.length} add, ~${toUpdate.length} update, -${toDelete.length} delete`);
+
+    // Process deletions
+    for (const doc of toDelete) {
+      await deleteDocument(doc);
+    }
+
+    // Process additions
+    for (const doc of toAdd) {
+      await indexDocument(user.userId, activeTokens, doc);
+    }
+
+    // Process updates
+    for (const { stored, drive } of toUpdate) {
+      await updateDocument(user.userId, activeTokens, stored, drive);
+    }
+
+    const result = { added: toAdd.length, updated: toUpdate.length, deleted: toDelete.length };
+    await markSyncCompleted(user.userId, result);
+    return result;
+
   } catch (error: any) {
-    console.error(`  Failed to fetch Google Drive docs: ${error.message}`);
-    // CRITICAL: Do NOT delete documents when we can't reach Google
-    // This preserves user data even when auth fails mid-sync
-    console.log(`  Preserving ${storedDocs.size} existing documents (no deletions on API failure)`);
-    return { added: 0, updated: 0, deleted: 0, authFailed: true };
+    console.error(`  Sync failed with error: ${error.message}`);
+    await markSyncFailed(user.userId, error.message);
+    throw error;
   }
-  console.log(`  Found ${driveDocs.length} documents in Google Drive`);
-
-  // Create a set of drive doc IDs for quick lookup
-  const driveDocIds = new Set(driveDocs.map((d) => d.id));
-
-  // Find documents to delete (in database but not in drive)
-  const toDelete: StoredDocument[] = [];
-  for (const [googleDocId, storedDoc] of storedDocs) {
-    if (!driveDocIds.has(googleDocId)) {
-      toDelete.push(storedDoc);
-    }
-  }
-
-  // SAFETY CHECK: If we have many docs in DB but Google returned 0 or very few,
-  // something is likely wrong (API error, permissions issue, etc.)
-  // Don't delete anything in this case - it's safer to have stale data than no data
-  if (storedDocs.size >= DELETION_SAFETY_THRESHOLD && driveDocs.length === 0) {
-    console.warn(`  ⚠️  SAFETY: Google returned 0 docs but we have ${storedDocs.size} in database`);
-    console.warn(`  ⚠️  Skipping ALL deletions to prevent data loss`);
-    console.warn(`  ⚠️  User may need to re-authenticate or check Google Drive permissions`);
-    // Still process additions/updates but skip deletions
-    toDelete.length = 0;
-  } else if (toDelete.length > storedDocs.size * 0.8 && toDelete.length > DELETION_SAFETY_THRESHOLD) {
-    // If we're about to delete more than 80% of docs and it's more than the threshold,
-    // that's suspicious - might be an API issue
-    console.warn(`  ⚠️  SAFETY: About to delete ${toDelete.length}/${storedDocs.size} docs (${Math.round(toDelete.length / storedDocs.size * 100)}%)`);
-    console.warn(`  ⚠️  This seems excessive - skipping deletions as a safety measure`);
-    toDelete.length = 0;
-  }
-
-  // Find documents to add or update
-  const toAdd: DriveDocument[] = [];
-  const toUpdate: { stored: StoredDocument; drive: DriveDocument }[] = [];
-
-  for (const driveDoc of driveDocs) {
-    const storedDoc = storedDocs.get(driveDoc.id);
-    if (!storedDoc) {
-      toAdd.push(driveDoc);
-    } else if (driveDoc.modifiedTime > storedDoc.google_modified_time) {
-      toUpdate.push({ stored: storedDoc, drive: driveDoc });
-    }
-  }
-
-  console.log(`  Sync plan: +${toAdd.length} add, ~${toUpdate.length} update, -${toDelete.length} delete`);
-
-  // Process deletions
-  for (const doc of toDelete) {
-    await deleteDocument(doc);
-  }
-
-  // Process additions
-  for (const doc of toAdd) {
-    await indexDocument(user.userId, activeTokens, doc);
-  }
-
-  // Process updates
-  for (const { stored, drive } of toUpdate) {
-    await updateDocument(user.userId, activeTokens, stored, drive);
-  }
-
-  return { added: toAdd.length, updated: toUpdate.length, deleted: toDelete.length };
 }
 
 /**

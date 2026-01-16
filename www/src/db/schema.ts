@@ -153,6 +153,21 @@ export async function runMigrations() {
     CREATE INDEX IF NOT EXISTS documents_user_id_idx ON documents(user_id)
   `);
 
+  // ========================================
+  // Sync status tracking (one row per user)
+  // ========================================
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS sync_status (
+      user_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'idle',
+      started_at TEXT,
+      completed_at TEXT,
+      last_result TEXT,
+      error TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
   console.log("Migrations completed successfully");
 }
 

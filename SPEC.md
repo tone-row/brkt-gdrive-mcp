@@ -11,31 +11,32 @@ Vector search over Google Drive documents, exposed via an MCP server.
 
 ## Overview
 
-This project enables semantic search over Google Docs for any user who connects their Google account. It consists of four components:
+This project enables semantic search over Google Docs for any user who connects their Google account. It consists of five components:
 
-1. **Web App** - Frontend for user authentication and Google OAuth connection
-2. **API Server** - Vercel-hosted API that handles search queries, document retrieval, and OAuth
-3. **Sync Job** - GitHub Actions workflow that syncs all users' Google Drives to the vector database
-4. **MCP Server** - npm package that exposes the API to MCP clients (Claude Desktop, Cursor, etc.)
+1. **Web App** - Next.js frontend for user authentication and Google OAuth connection (Vercel)
+2. **API Server** - Next.js API routes for search, documents, and OAuth (Vercel)
+3. **Sync Server** - Standalone Bun server for long-running sync jobs (Fly.io)
+4. **Sync Cron** - GitHub Actions workflow that triggers syncs 3x daily
+5. **MCP Server** - npm package that exposes the API to MCP clients (Claude Desktop, Cursor, etc.)
 
 ## Architecture
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   Web App       │    │  MCP Client     │    │  GitHub Actions │
-│   (Frontend)    │    │  (Claude, etc)  │    │  (Cron: 2x/day) │
+│   (Next.js)     │    │  (Claude, etc)  │    │  (Cron: 3x/day) │
 └────────┬────────┘    └────────┬────────┘    └────────┬────────┘
          │                      │                      │
-         │ OAuth +              │ API Key              │
+         │ OAuth +              │ API Key              │ CRON_SECRET
          │ Better Auth          │                      │
          │                      │                      │
+         ▼                      ▼                      ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Vercel API    │    │   Vercel API    │    │  Fly.io Sync    │
+│  (auth, search) │    │   (search)      │    │    Server       │
+└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
+         │                      │                      │
          └──────────────────────┼──────────────────────┘
-                                │
-                                ▼
-                       ┌─────────────────┐
-                       │   Vercel API    │
-                       │  + Better Auth  │
-                       └────────┬────────┘
                                 │
           ┌─────────────────────┼─────────────────────┐
           ▼                     ▼                     ▼
@@ -49,42 +50,40 @@ This project enables semantic search over Google Docs for any user who connects 
 
 ### User Registration/Login (Better Auth)
 1. User visits web app
-2. Signs up/logs in via Better Auth (email/password or social providers)
+2. Signs up/logs in via Better Auth (Google OAuth)
 3. Better Auth creates session, stores user in `users` table
 
 ### Google Drive Connection (OAuth 2.0)
-1. Authenticated user clicks "Connect Google Drive"
-2. Redirected to Google OAuth consent screen
-3. User grants `drive.readonly` scope
-4. Callback receives authorization code
-5. Exchange code for access token + refresh token
-6. Store encrypted refresh token in `google_connections` table
-7. User can now sync their Google Drive
+1. User signs in with Google via Better Auth
+2. Better Auth handles OAuth flow with `drive.readonly` scope
+3. Access token + refresh token stored in `accounts` table
+4. User can now sync their Google Drive
 
 ### MCP Server Authentication
-1. User generates an API key from the web app
+1. User generates an API key from the web app dashboard
 2. API key stored (hashed) in `api_keys` table
 3. User configures MCP server with their API key
 4. All MCP requests include the API key for user identification
 
 ## Components
 
-### 1. Web App (Frontend)
+### 1. Web App (Next.js on Vercel)
 
-Simple frontend for authentication and account management.
+Next.js app with React frontend for authentication and account management.
 
 **Pages:**
 - `/` - Landing page with "Get Started" CTA
-- `/login` - Better Auth login
+- `/login` - Better Auth login (Google OAuth)
 - `/signup` - Better Auth registration
-- `/dashboard` - Connect Google Drive, view sync status, manage API keys
+- `/dashboard` - View sync status, manage API keys, trigger sync, disconnect Google
 
 **Tech Stack:**
-- React (via Bun's HTML imports)
-- Better Auth client
+- Next.js 16 (App Router)
+- Better Auth
 - Tailwind CSS
+- TypeScript
 
-### 2. API Server (Vercel)
+### 2. API Server (Next.js API Routes on Vercel)
 
 Hosted on Vercel. Handles authentication, OAuth, search, and document operations.
 
@@ -92,15 +91,7 @@ Hosted on Vercel. Handles authentication, OAuth, search, and document operations
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/auth/*` | Better Auth handlers (login, signup, session, etc.) |
-
-**OAuth Endpoints:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/oauth/google` | Initiate Google OAuth flow |
-| `GET` | `/api/oauth/google/callback` | Handle OAuth callback, store tokens |
-| `DELETE` | `/api/oauth/google` | Disconnect Google Drive |
+| `*` | `/api/auth/*` | Better Auth handlers (login, signup, session, etc.) |
 
 **API Key Endpoints:**
 
@@ -118,44 +109,67 @@ Hosted on Vercel. Handles authentication, OAuth, search, and document operations
 | `GET` | `/api/documents` | List user's indexed documents |
 | `GET` | `/api/documents/:id` | Get full document content |
 
-**Sync Endpoints (internal, require cron secret):**
+**User Endpoints (require session):**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/sync/trigger` | Trigger sync for all users (called by cron) |
+| `GET` | `/api/me/status` | Get user's sync status and document count |
+| `POST` | `/api/me/sync` | Trigger sync for current user (calls Fly.io) |
+| `DELETE` | `/api/oauth/google` | Disconnect Google Drive |
+
+### 3. Sync Server (Bun on Fly.io)
+
+Standalone Bun HTTP server for long-running sync operations. Deployed on Fly.io with no timeout limits.
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `POST` | `/sync` | Sync all users (requires CRON_SECRET) |
+| `POST` | `/sync/:userId` | Sync specific user (requires CRON_SECRET) |
+
+**Features:**
+- Auto-scales to zero when idle (cost: ~$0/month)
+- Wakes up when pinged by GitHub Actions or dashboard
+- No timeout limits - can run syncs as long as needed
+- Token refresh with database persistence
+- Safety safeguards against accidental data deletion
 
 **Environment Variables:**
 - `TURSO_URL` - Turso database URL
 - `TURSO_AUTH_TOKEN` - Turso auth token
-- `OPENAI_API_KEY` - For embedding search queries
-- `BETTER_AUTH_SECRET` - Better Auth secret key
 - `GOOGLE_CLIENT_ID` - Google OAuth client ID
 - `GOOGLE_CLIENT_SECRET` - Google OAuth client secret
-- `CRON_SECRET` - Secret for authenticating cron job requests
-- `ENCRYPTION_KEY` - For encrypting stored OAuth refresh tokens
+- `OPENAI_API_KEY` - For generating embeddings
+- `CRON_SECRET` - Secret for authenticating sync requests
+- `PORT` - Server port (default: 8080)
 
-### 3. Sync Job (GitHub Actions)
+### 4. Sync Cron (GitHub Actions)
 
-Runs on a schedule (twice daily) to keep all users' documents in sync.
+Runs 3x daily to keep all users' documents in sync.
+
+**Schedule:** 6 AM, 2 PM, 10 PM UTC
 
 **Process:**
-1. Call `/api/sync/trigger` with `CRON_SECRET`
-2. API fetches all users with connected Google accounts
-3. For each user:
-   - Use their stored refresh token to get a fresh access token
-   - Fetch list of all Google Docs they have access to
-   - Compare against their last sync state
+1. GitHub Actions triggers at scheduled time
+2. Calls Fly.io sync server `/sync` with `CRON_SECRET`
+3. Sync server processes all users with connected Google accounts
+4. For each user:
+   - Refresh OAuth token if expired (persist new token)
+   - Fetch list of all Google Docs from Drive
+   - Compare against database state
    - Process new/updated/deleted documents
-   - Update user's sync state timestamp
-4. Handle token refresh failures (mark connection as needing re-auth)
+   - Update sync status
+5. Safety checks prevent mass deletion if API returns unexpected results
 
 **GitHub Secrets Required:**
-- `API_URL` - Vercel deployment URL
-- `CRON_SECRET` - Matches the API's `CRON_SECRET`
+- `SYNC_SERVER_URL` - Fly.io sync server URL (e.g., `https://brkt-gdrive-sync.fly.dev`)
+- `CRON_SECRET` - Matches the sync server's `CRON_SECRET`
 
-### 4. MCP Server (npm package)
+### 5. MCP Server (npx from GitHub)
 
-Published as `brkt-gdrive-mcp` on npm. Thin client that calls the API with user's API key.
+Distributed via `npx github:tone-row/brkt-gdrive-mcp`. Thin client that calls the API with user's API key.
 
 **Tools:**
 
@@ -165,13 +179,13 @@ Published as `brkt-gdrive-mcp` on npm. Thin client that calls the API with user'
 | `expand_document` | Get the full text of a document by ID. |
 | `list_documents` | List all your indexed documents with metadata. |
 
-**Configuration:**
+**Configuration (Claude Desktop / Cursor):**
 ```json
 {
   "mcpServers": {
     "gdrive-search": {
       "command": "npx",
-      "args": ["brkt-gdrive-mcp"],
+      "args": ["-y", "github:tone-row/brkt-gdrive-mcp"],
       "env": {
         "GDRIVE_API_KEY": "your-api-key-here"
       }
@@ -205,7 +219,7 @@ Published as `brkt-gdrive-mcp` on npm. Thin client that calls the API with user'
 | `created_at` | TEXT | Session creation time |
 | `updated_at` | TEXT | Last update time |
 
-### `accounts` (Better Auth - for social logins)
+### `accounts` (Better Auth - OAuth tokens)
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | TEXT PRIMARY KEY | Account ID |
@@ -229,19 +243,6 @@ Published as `brkt-gdrive-mcp` on npm. Thin client that calls the API with user'
 | `key_prefix` | TEXT | First 8 chars for identification |
 | `last_used_at` | TEXT | Last time key was used |
 | `created_at` | TEXT | When key was created |
-
-### `google_connections`
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | TEXT PRIMARY KEY | UUID |
-| `user_id` | TEXT UNIQUE | FK to users.id (one connection per user) |
-| `google_email` | TEXT | Google account email |
-| `refresh_token_encrypted` | TEXT | Encrypted OAuth refresh token |
-| `scopes` | TEXT | Granted OAuth scopes |
-| `connected_at` | TEXT | When connection was established |
-| `last_sync_at` | TEXT | Last successful sync |
-| `sync_status` | TEXT | "active", "needs_reauth", "error" |
-| `sync_error` | TEXT | Error message if sync failed |
 
 ### `documents`
 | Column | Type | Description |
@@ -267,12 +268,24 @@ Published as `brkt-gdrive-mcp` on npm. Thin client that calls the API with user'
 | `text` | TEXT | Chunk content |
 | `embedding` | F32_BLOB(1536) | Vector embedding |
 
-*Note: `user_id` is denormalized from documents to enable filtered vector search. Without this, we'd have to join through documents for every vector query, which is inefficient for multi-tenant search.*
+*Note: `user_id` is denormalized from documents to enable filtered vector search.*
+
+### `sync_status`
+| Column | Type | Description |
+|--------|------|-------------|
+| `user_id` | TEXT PRIMARY KEY | FK to users.id (one row per user) |
+| `status` | TEXT | 'idle', 'syncing', 'failed' |
+| `started_at` | TEXT | When current/last sync started |
+| `completed_at` | TEXT | When last sync completed |
+| `last_result` | TEXT | JSON: {added, updated, deleted} |
+| `error` | TEXT | Error message if sync failed |
+
+*Note: This table has exactly one row per user, updated on each sync.*
 
 ## Chunking Strategy
 
-- **Chunk size**: ~500-1000 tokens
-- **Overlap**: ~100 tokens
+- **Chunk size**: ~500-1000 tokens (~3000 chars)
+- **Overlap**: ~100 tokens (~400 chars)
 - **Method**: Split on paragraph boundaries where possible, fall back to sentence boundaries
 
 ## Embedding Model
@@ -284,58 +297,54 @@ Published as `brkt-gdrive-mcp` on npm. Thin client that calls the API with user'
 
 ```
 brkt-gdrive-mcp/
-├── SPEC.md
-├── package.json
-├── index.html                 # Main HTML entry point
-├── frontend/
-│   ├── App.tsx               # Main React app
-│   ├── pages/
-│   │   ├── Landing.tsx
-│   │   ├── Login.tsx
-│   │   ├── Signup.tsx
-│   │   └── Dashboard.tsx
-│   ├── components/
-│   │   ├── GoogleConnectButton.tsx
-│   │   ├── ApiKeyManager.tsx
-│   │   └── SyncStatus.tsx
-│   └── lib/
-│       └── auth-client.ts    # Better Auth client
-├── api/                       # Vercel API routes
-│   ├── auth/
-│   │   └── [...all].ts       # Better Auth catch-all
-│   ├── oauth/
-│   │   └── google/
-│   │       ├── index.ts      # Initiate OAuth
-│   │       └── callback.ts   # Handle callback
-│   ├── keys/
-│   │   ├── index.ts          # Create/list keys
-│   │   └── [id].ts           # Delete key
-│   ├── search.ts
-│   ├── documents/
-│   │   ├── index.ts
-│   │   └── [id].ts
-│   └── sync/
-│       └── trigger.ts        # Cron endpoint
-├── src/
-│   ├── db/
-│   │   ├── schema.ts         # Database schema + migrations
-│   │   └── client.ts         # Turso client
-│   ├── auth/
-│   │   └── index.ts          # Better Auth configuration
-│   ├── sync/
-│   │   ├── index.ts          # Main sync logic
-│   │   ├── google-drive.ts   # Google Drive API client (OAuth-based)
-│   │   ├── chunker.ts        # Text chunking logic
-│   │   └── embeddings.ts     # OpenAI embeddings client
-│   ├── lib/
-│   │   ├── encryption.ts     # Token encryption utilities
-│   │   └── api-keys.ts       # API key generation/validation
-│   └── mcp/
-│       └── index.ts          # MCP server entry point
-├── .github/
-│   └── workflows/
-│       └── sync.yml          # GitHub Actions workflow
-└── vercel.json
+├── SPEC.md                        # This file
+├── README.md                      # User-facing documentation
+├── package.json                   # Root package (MCP server)
+├── bin/
+│   └── mcp.js                     # MCP server entry point
+├── www/                           # Next.js web app (Vercel)
+│   ├── package.json
+│   ├── next.config.ts
+│   ├── src/
+│   │   ├── app/                   # Next.js App Router
+│   │   │   ├── page.tsx           # Landing page
+│   │   │   ├── login/page.tsx
+│   │   │   ├── signup/page.tsx
+│   │   │   ├── dashboard/page.tsx
+│   │   │   └── api/               # API routes
+│   │   │       ├── auth/[...all]/route.ts
+│   │   │       ├── keys/route.ts
+│   │   │       ├── search/route.ts
+│   │   │       ├── documents/route.ts
+│   │   │       ├── me/status/route.ts
+│   │   │       ├── me/sync/route.ts
+│   │   │       └── oauth/google/route.ts
+│   │   ├── db/
+│   │   │   ├── client.ts          # Turso client
+│   │   │   └── schema.ts          # Database migrations
+│   │   ├── auth.ts                # Better Auth config
+│   │   └── sync/                  # Sync logic (also used by Fly.io)
+│   │       ├── index.ts
+│   │       ├── google-drive.ts
+│   │       ├── chunker.ts
+│   │       └── embeddings.ts
+│   └── components/                # React components
+├── sync-server/                   # Fly.io sync server
+│   ├── package.json
+│   ├── Dockerfile
+│   ├── fly.toml
+│   ├── README.md
+│   └── src/
+│       ├── server.ts              # Bun HTTP server
+│       ├── db/client.ts
+│       └── sync/                  # Sync logic (copied from www)
+│           ├── index.ts
+│           ├── google-drive.ts
+│           ├── chunker.ts
+│           └── embeddings.ts
+└── .github/
+    └── workflows/
+        └── sync.yml               # GitHub Actions cron
 ```
 
 ## Google Cloud Setup (OAuth)
@@ -350,43 +359,53 @@ brkt-gdrive-mcp/
    - Test users (while in testing mode)
 5. Create OAuth 2.0 credentials:
    - Application type: Web application
-   - Authorized redirect URIs: `https://your-domain.vercel.app/api/oauth/google/callback`
+   - Authorized redirect URIs: `https://your-domain.vercel.app/api/auth/callback/google`
 6. Copy Client ID and Client Secret to environment variables
 7. **Important**: Publish the app to production to avoid 7-day token expiration
 
 ## Security Considerations
 
-- **Refresh tokens**: Encrypted at rest using AES-256-GCM
+- **OAuth tokens**: Stored in Better Auth `accounts` table
+- **Token refresh**: Handled automatically by sync server, new tokens persisted to DB
 - **API keys**: Only the hash is stored; the full key is shown once at creation
 - **Session tokens**: HttpOnly, Secure, SameSite cookies via Better Auth
+- **Sync safety**: Multiple safeguards prevent accidental mass deletion
 - **CORS**: Restricted to your domain
-- **Rate limiting**: Consider adding rate limiting on search endpoints
-
-## Development
-
-```bash
-# Install dependencies
-bun install
-
-# Run database migrations
-bun run migrate
-
-# Start dev server (frontend + API)
-bun run dev
-
-# Run MCP server locally
-bun run mcp
-```
 
 ## Deployment
 
+### Vercel (Web App + API)
 ```bash
-# Deploy to Vercel
+cd www
 vercel deploy --prod
-
-# Set environment variables in Vercel dashboard
-# Set GitHub secrets for the sync workflow
 ```
+
+Environment variables needed in Vercel:
+- `TURSO_URL`
+- `TURSO_AUTH_TOKEN`
+- `OPENAI_API_KEY`
+- `BETTER_AUTH_SECRET`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+
+### Fly.io (Sync Server)
+```bash
+cd sync-server
+fly deploy
+```
+
+Secrets needed in Fly.io:
+- `TURSO_URL`
+- `TURSO_AUTH_TOKEN`
+- `OPENAI_API_KEY`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `CRON_SECRET`
+
+### GitHub Actions
+Secrets needed:
+- `SYNC_SERVER_URL` (e.g., `https://brkt-gdrive-sync.fly.dev`)
+- `CRON_SECRET`
 
 ## Future Considerations
 

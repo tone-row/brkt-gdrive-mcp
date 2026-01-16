@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth-helper";
 import { db } from "@/db/client";
+import { getSyncStatus } from "@/sync/status";
 
 export async function GET(request: NextRequest) {
   try {
@@ -30,10 +31,20 @@ export async function GET(request: NextRequest) {
     });
     const chunkCount = (chunkResult.rows[0]?.count as number) || 0;
 
+    // Get sync status
+    const syncStatus = await getSyncStatus(user.id);
+
     return NextResponse.json({
       googleConnected: !!hasGoogleConnected,
       documentCount,
       chunkCount,
+      syncStatus: syncStatus ? {
+        status: syncStatus.status,
+        startedAt: syncStatus.startedAt,
+        completedAt: syncStatus.completedAt,
+        lastResult: syncStatus.lastResult,
+        error: syncStatus.error,
+      } : null,
     });
   } catch (error) {
     console.error("Status error:", error);
