@@ -33,15 +33,29 @@ export async function getSyncStatus(userId: string): Promise<SyncStatus | null> 
   };
 }
 
+// If a sync has been running longer than this, consider it stale
+const SYNC_TIMEOUT_MINUTES = 10;
+
 /**
  * Mark a sync as started. Returns false if a sync is already in progress.
+ * If a sync has been running for more than SYNC_TIMEOUT_MINUTES, it's considered stale.
  */
 export async function markSyncStarted(userId: string): Promise<boolean> {
   // Check if already syncing
   const existing = await getSyncStatus(userId);
-  if (existing?.status === "syncing") {
-    console.log(`  Sync already in progress for user ${userId}`);
-    return false;
+  if (existing?.status === "syncing" && existing.startedAt) {
+    const startedAt = new Date(existing.startedAt + "Z"); // Add Z for UTC
+    const now = new Date();
+    const minutesElapsed = (now.getTime() - startedAt.getTime()) / (1000 * 60);
+
+    if (minutesElapsed < SYNC_TIMEOUT_MINUTES) {
+      console.log(`  Sync already in progress for user ${userId} (started ${minutesElapsed.toFixed(1)} min ago)`);
+      return false;
+    } else {
+      console.log(`  Stale sync detected (started ${minutesElapsed.toFixed(1)} min ago), allowing new sync`);
+      // Mark the stale sync as failed before starting new one
+      await markSyncFailed(userId, "Sync timed out (server may have restarted)");
+    }
   }
 
   // Upsert the sync status
