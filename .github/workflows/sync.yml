@@ -9,7 +9,7 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # Allow long-running syncs
+    timeout-minutes: 5 # Server responds immediately, sync runs in background
 
     steps:
       - name: Trigger sync via Fly.io
@@ -25,7 +25,7 @@ jobs:
             "${SYNC_SERVER_URL}/sync" \
             -H "Authorization: Bearer ${CRON_SECRET}" \
             -H "Content-Type: application/json" \
-            --max-time 1800)
+            --max-time 30)
 
           http_code=$(echo "$response" | tail -n1)
           body=$(echo "$response" | sed '$d')
@@ -34,8 +34,8 @@ jobs:
           echo "HTTP Status: $http_code"
 
           if [ "$http_code" -ne 200 ]; then
-            echo "Sync failed with status $http_code"
+            echo "Failed to trigger sync (status $http_code)"
             exit 1
           fi
 
-          echo "Sync completed successfully"
+          echo "Sync triggered successfully (running in background on server)"

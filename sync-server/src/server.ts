@@ -44,36 +44,28 @@ Bun.serve({
       console.log(`Full sync triggered at ${new Date().toISOString()}`);
       console.log(`${"=".repeat(50)}`);
 
-      try {
-        const startTime = Date.now();
-        const result = await sync();
-        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
-        console.log(`Sync completed in ${duration}s`);
-
-        return new Response(JSON.stringify({
-          success: true,
-          message: "Sync completed successfully",
-          duration: `${duration}s`,
-          ...result,
-          timestamp: new Date().toISOString(),
-        }), {
-          headers: { "Content-Type": "application/json" },
+      // Start sync in background and return immediately
+      // This prevents gateway timeouts from Fly.io proxy
+      const startTime = Date.now();
+      sync()
+        .then((result) => {
+          const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.log(`\nFull sync completed in ${duration}s`);
+          console.log(`Total: +${result.totalAdded} added, ~${result.totalUpdated} updated, -${result.totalDeleted} deleted`);
+          console.log(`Users: ${result.usersProcessed} processed, ${result.authFailures} auth failures`);
+        })
+        .catch((error) => {
+          console.error(`Full sync failed: ${error.message}`);
+          console.error(error.stack);
         });
-      } catch (error: any) {
-        console.error(`Sync failed: ${error.message}`);
-        console.error(error.stack);
 
-        return new Response(JSON.stringify({
-          success: false,
-          error: "Sync failed",
-          message: error.message,
-          timestamp: new Date().toISOString(),
-        }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
+      return new Response(JSON.stringify({
+        success: true,
+        message: "Sync started",
+        timestamp: new Date().toISOString(),
+      }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     // Sync single user endpoint: POST /sync/:userId
