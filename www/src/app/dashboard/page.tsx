@@ -14,6 +14,7 @@ interface SyncStatusInfo {
 
 interface UserStatus {
   googleConnected: boolean;
+  needsReconnect: boolean;
   documentCount: number;
   chunkCount: number;
   syncStatus: SyncStatusInfo | null;
@@ -117,7 +118,7 @@ export default function Dashboard() {
     try {
       const res = await fetch("/api/oauth/google", { method: "DELETE" });
       if (res.ok) {
-        setStatus({ googleConnected: false, documentCount: 0, chunkCount: 0, syncStatus: null });
+        setStatus({ googleConnected: false, needsReconnect: false, documentCount: 0, chunkCount: 0, syncStatus: null });
         setSearchResults(null);
         setSyncResult(null);
       } else {
@@ -297,6 +298,20 @@ export default function Dashboard() {
                 </button>
               </div>
             </>
+          ) : status?.needsReconnect ? (
+            <>
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg mb-4">
+                <p className="text-amber-800 text-sm">
+                  Your Google authorization has expired. Reconnect to continue syncing your {status.documentCount} indexed documents.
+                </p>
+              </div>
+              <button
+                onClick={handleConnectGoogle}
+                className="px-5 py-2.5 bg-amber-500 text-white rounded-lg font-medium hover:bg-amber-600"
+              >
+                Reconnect Google Drive
+              </button>
+            </>
           ) : (
             <>
               <p className="text-gray-600 text-sm mb-4">
@@ -377,7 +392,7 @@ export default function Dashboard() {
         )}
 
         {/* Search Documents */}
-        {status?.googleConnected && status.documentCount > 0 && (
+        {(status?.googleConnected || status?.needsReconnect) && status.documentCount > 0 && (
           <section className="bg-white p-6 rounded-xl shadow-sm">
             <h2 className="text-xl font-semibold mb-2">Search Documents</h2>
             <p className="text-gray-600 text-sm mb-4">

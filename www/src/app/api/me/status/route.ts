@@ -15,7 +15,8 @@ export async function GET(request: NextRequest) {
       sql: `SELECT id, access_token FROM accounts WHERE user_id = ? AND provider_id = 'google'`,
       args: [user.id],
     });
-    const hasGoogleConnected = accountResult.rows.length > 0 && accountResult.rows[0]!.access_token;
+    const hasGoogleAccount = accountResult.rows.length > 0;
+    const hasValidToken = hasGoogleAccount && accountResult.rows[0]!.access_token;
 
     // Get document count
     const docResult = await db.execute({
@@ -34,8 +35,12 @@ export async function GET(request: NextRequest) {
     // Get sync status
     const syncStatus = await getSyncStatus(user.id);
 
+    // User needs to reconnect if they have documents but no valid token
+    const needsReconnect = !hasValidToken && documentCount > 0;
+
     return NextResponse.json({
-      googleConnected: !!hasGoogleConnected,
+      googleConnected: !!hasValidToken,
+      needsReconnect,
       documentCount,
       chunkCount,
       syncStatus: syncStatus ? {
