@@ -9,19 +9,23 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # Allow long-running syncs
 
     steps:
-      - name: Trigger sync via API
+      - name: Trigger sync via Fly.io
         env:
-          API_URL: ${{ secrets.API_URL }}
+          # SYNC_SERVER_URL should be set to the Fly.io sync server URL
+          # e.g., https://brkt-gdrive-sync.fly.dev
+          SYNC_SERVER_URL: ${{ secrets.SYNC_SERVER_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           echo "Triggering sync at $(date -u)"
 
           response=$(curl -s -w "\n%{http_code}" -X POST \
-            "${API_URL}/api/sync/trigger" \
+            "${SYNC_SERVER_URL}/sync" \
             -H "Authorization: Bearer ${CRON_SECRET}" \
-            -H "Content-Type: application/json")
+            -H "Content-Type: application/json" \
+            --max-time 1800)
 
           http_code=$(echo "$response" | tail -n1)
           body=$(echo "$response" | sed '$d')

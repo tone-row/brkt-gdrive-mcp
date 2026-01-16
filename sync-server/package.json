@@ -1,0 +1,19 @@
+{
+  "name": "brkt-gdrive-sync-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.15.0",
+    "googleapis": "^146.0.0",
+    "openai": "^4.103.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.9",
+    "@types/uuid": "^10.0.0"
+  }
+}

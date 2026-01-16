@@ -1,0 +1,23 @@
+# Use the official Bun image
+FROM oven/bun:1 AS base
+WORKDIR /app
+
+# Install dependencies
+FROM base AS install
+COPY package.json bun.lock* ./
+RUN bun install --frozen-lockfile --production
+
+# Final image
+FROM base AS release
+COPY --from=install /app/node_modules ./node_modules
+COPY src ./src
+COPY package.json ./
+
+# Run as non-root user
+USER bun
+
+# Expose the port
+EXPOSE 8080
+
+# Start the server
+CMD ["bun", "run", "src/server.ts"]
