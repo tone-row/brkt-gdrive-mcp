@@ -34,7 +34,10 @@ export async function getSyncStatus(userId: string): Promise<SyncStatus | null> 
 }
 
 // If a sync has been running longer than this, consider it stale
-const SYNC_TIMEOUT_MINUTES = 10;
+// Note: Fly.io auto-stops machines after ~5 minutes of no active HTTP connections,
+// so if sync takes longer than that, the machine gets killed and status stays "syncing".
+// Setting this to 5 minutes allows users to retry sooner.
+const SYNC_TIMEOUT_MINUTES = 5;
 
 /**
  * Mark a sync as started. Returns false if a sync is already in progress.
