@@ -162,10 +162,6 @@ async function indexDocument(
   const chunks = chunkText(text);
   console.log(`    Created ${chunks.length} chunks`);
 
-  const chunkTexts = chunks.map((c) => c.text);
-  const embeddings = await generateEmbeddings(chunkTexts);
-  console.log(`    Generated ${embeddings.length} embeddings`);
-
   const docId = uuid();
   await db.execute({
     sql: `INSERT INTO documents (id, user_id, google_doc_id, title, full_text, google_modified_time)
@@ -173,23 +169,31 @@ async function indexDocument(
     args: [docId, userId, doc.id, doc.name, text, doc.modifiedTime],
   });
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunkId = uuid();
-    await db.execute({
-      sql: `INSERT INTO chunks (id, document_id, user_id, chunk_index, text, embedding)
-            VALUES (?, ?, ?, ?, ?, vector(?))`,
-      args: [
-        chunkId,
-        docId,
-        userId,
-        chunks[i]!.index,
-        chunks[i]!.text,
-        `[${embeddings[i]!.join(",")}]`,
-      ],
-    });
+  // Process chunks in small batches to reduce memory usage
+  const CHUNK_BATCH_SIZE = 10;
+  for (let i = 0; i < chunks.length; i += CHUNK_BATCH_SIZE) {
+    const batchChunks = chunks.slice(i, i + CHUNK_BATCH_SIZE);
+    const batchTexts = batchChunks.map((c) => c.text);
+    const batchEmbeddings = await generateEmbeddings(batchTexts);
+
+    for (let j = 0; j < batchChunks.length; j++) {
+      const chunkId = uuid();
+      await db.execute({
+        sql: `INSERT INTO chunks (id, document_id, user_id, chunk_index, text, embedding)
+              VALUES (?, ?, ?, ?, ?, vector(?))`,
+        args: [
+          chunkId,
+          docId,
+          userId,
+          batchChunks[j]!.index,
+          batchChunks[j]!.text,
+          `[${batchEmbeddings[j]!.join(",")}]`,
+        ],
+      });
+    }
   }
 
-  console.log(`    Indexed successfully`);
+  console.log(`    Indexed ${chunks.length} chunks successfully`);
 }
 
 async function updateDocument(
@@ -218,10 +222,6 @@ async function updateDocument(
   const chunks = chunkText(text);
   console.log(`    Created ${chunks.length} chunks`);
 
-  const chunkTexts = chunks.map((c) => c.text);
-  const embeddings = await generateEmbeddings(chunkTexts);
-  console.log(`    Generated ${embeddings.length} embeddings`);
-
   await db.execute({
     sql: `UPDATE documents
           SET title = ?, full_text = ?, google_modified_time = ?, updated_at = datetime('now')
@@ -229,23 +229,31 @@ async function updateDocument(
     args: [driveDoc.name, text, driveDoc.modifiedTime, storedDoc.id],
   });
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunkId = uuid();
-    await db.execute({
-      sql: `INSERT INTO chunks (id, document_id, user_id, chunk_index, text, embedding)
-            VALUES (?, ?, ?, ?, ?, vector(?))`,
-      args: [
-        chunkId,
-        storedDoc.id,
-        userId,
-        chunks[i]!.index,
-        chunks[i]!.text,
-        `[${embeddings[i]!.join(",")}]`,
-      ],
-    });
+  // Process chunks in small batches to reduce memory usage
+  const CHUNK_BATCH_SIZE = 10;
+  for (let i = 0; i < chunks.length; i += CHUNK_BATCH_SIZE) {
+    const batchChunks = chunks.slice(i, i + CHUNK_BATCH_SIZE);
+    const batchTexts = batchChunks.map((c) => c.text);
+    const batchEmbeddings = await generateEmbeddings(batchTexts);
+
+    for (let j = 0; j < batchChunks.length; j++) {
+      const chunkId = uuid();
+      await db.execute({
+        sql: `INSERT INTO chunks (id, document_id, user_id, chunk_index, text, embedding)
+              VALUES (?, ?, ?, ?, ?, vector(?))`,
+        args: [
+          chunkId,
+          storedDoc.id,
+          userId,
+          batchChunks[j]!.index,
+          batchChunks[j]!.text,
+          `[${batchEmbeddings[j]!.join(",")}]`,
+        ],
+      });
+    }
   }
 
-  console.log(`    Updated successfully`);
+  console.log(`    Updated ${chunks.length} chunks successfully`);
 }
 
 async function deleteDocument(storedDoc: StoredDocument): Promise<void> {
