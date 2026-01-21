@@ -168,6 +168,61 @@ export async function runMigrations() {
     )
   `);
 
+  // ========================================
+  // OAuth 2.0 tables for MCP remote authentication
+  // ========================================
+
+  // OAuth clients (client_id + client_secret pairs)
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      client_id TEXT UNIQUE NOT NULL,
+      client_secret_hash TEXT NOT NULL,
+      client_id_prefix TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Authorization codes (short-lived, one-time use)
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+      code_hash TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      code_challenge TEXT,
+      code_challenge_method TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (client_id) REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Access tokens (short-lived) and refresh tokens (long-lived)
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+      access_token_hash TEXT PRIMARY KEY,
+      refresh_token_hash TEXT UNIQUE NOT NULL,
+      client_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (client_id) REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Create index on client_id for oauth_clients
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS oauth_clients_user_id_idx ON oauth_clients(user_id)
+  `);
+
   console.log("Migrations completed successfully");
 }
 
