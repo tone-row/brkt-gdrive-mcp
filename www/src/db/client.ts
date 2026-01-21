@@ -18,11 +18,13 @@ function getDb(): Client {
 
 // Export wrapper that lazily initializes the client
 // Using explicit method delegation instead of Proxy to avoid issues with private fields
-export const db = {
-  execute: (...args: Parameters<Client["execute"]>) => getDb().execute(...args),
-  batch: (...args: Parameters<Client["batch"]>) => getDb().batch(...args),
-  transaction: (...args: Parameters<Client["transaction"]>) => getDb().transaction(...args),
-  executeMultiple: (...args: Parameters<Client["executeMultiple"]>) => getDb().executeMultiple(...args),
+export const db: Client = {
+  get closed() { return getDb().closed; },
+  get protocol() { return getDb().protocol; },
+  execute: (stmt) => getDb().execute(stmt),
+  batch: (stmts, mode) => getDb().batch(stmts, mode),
+  transaction: (mode) => getDb().transaction(mode),
+  executeMultiple: (sql) => getDb().executeMultiple(sql),
   sync: () => getDb().sync(),
   close: () => getDb().close(),
 };
