@@ -98,11 +98,6 @@ export async function runMigrations() {
   `);
 
   // Documents table (multi-tenant: includes user_id)
-  // Drop old single-tenant table if it exists (migration from old schema)
-  await db.execute(`DROP TABLE IF EXISTS chunks`);
-  await db.execute(`DROP TABLE IF EXISTS documents`);
-  await db.execute(`DROP TABLE IF EXISTS sync_state`);
-
   await db.execute(`
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
