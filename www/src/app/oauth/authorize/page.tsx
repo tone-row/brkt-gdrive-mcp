@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "@/lib/auth-client";
 
@@ -9,7 +9,7 @@ interface ClientInfo {
   clientIdPrefix: string;
 }
 
-export default function OAuthAuthorize() {
+function OAuthAuthorizeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { data: session, isPending } = useSession();
@@ -196,5 +196,17 @@ export default function OAuthAuthorize() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function OAuthAuthorize() {
+  return (
+    <Suspense fallback={
+      <div className="flex justify-center items-center min-h-screen">
+        <p className="text-gray-500">Loading...</p>
+      </div>
+    }>
+      <OAuthAuthorizeContent />
+    </Suspense>
   );
 }
