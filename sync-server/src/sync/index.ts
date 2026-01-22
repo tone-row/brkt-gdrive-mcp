@@ -163,10 +163,14 @@ async function indexDocument(
   console.log(`    Created ${chunks.length} chunks`);
 
   const docId = uuid();
+
+  // Insert document with a placeholder timestamp - we'll update it AFTER all chunks succeed.
+  // This ensures that if we die mid-chunks, the next sync will see this doc needs re-indexing.
+  const PLACEHOLDER_TIME = "1970-01-01T00:00:00.000Z";
   await db.execute({
     sql: `INSERT INTO documents (id, user_id, google_doc_id, title, full_text, google_modified_time)
           VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [docId, userId, doc.id, doc.name, text, doc.modifiedTime],
+    args: [docId, userId, doc.id, doc.name, text, PLACEHOLDER_TIME],
   });
 
   // Process chunks in small batches to reduce memory usage
@@ -193,6 +197,12 @@ async function indexDocument(
     }
   }
 
+  // NOW update the timestamp - all chunks succeeded
+  await db.execute({
+    sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
+    args: [doc.modifiedTime, docId],
+  });
+
   console.log(`    Indexed ${chunks.length} chunks successfully`);
 }
 
@@ -204,6 +214,7 @@ async function updateDocument(
 ): Promise<void> {
   console.log(`  Updating: ${driveDoc.name}`);
 
+  // Delete old chunks first
   await db.execute({
     sql: "DELETE FROM chunks WHERE document_id = ?",
     args: [storedDoc.id],
@@ -222,11 +233,14 @@ async function updateDocument(
   const chunks = chunkText(text);
   console.log(`    Created ${chunks.length} chunks`);
 
+  // Update document content but NOT the timestamp yet.
+  // We'll update timestamp AFTER all chunks succeed.
+  // This ensures if we die mid-chunks, next sync will re-index this doc.
   await db.execute({
     sql: `UPDATE documents
-          SET title = ?, full_text = ?, google_modified_time = ?, updated_at = datetime('now')
+          SET title = ?, full_text = ?, updated_at = datetime('now')
           WHERE id = ?`,
-    args: [driveDoc.name, text, driveDoc.modifiedTime, storedDoc.id],
+    args: [driveDoc.name, text, storedDoc.id],
   });
 
   // Process chunks in small batches to reduce memory usage
@@ -252,6 +266,12 @@ async function updateDocument(
       });
     }
   }
+
+  // NOW update the timestamp - all chunks succeeded
+  await db.execute({
+    sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
+    args: [driveDoc.modifiedTime, storedDoc.id],
+  });
 
   console.log(`    Updated ${chunks.length} chunks successfully`);
 }
@@ -347,11 +367,18 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     const toAdd: DriveDocument[] = [];
     const toUpdate: { stored: StoredDocument; drive: DriveDocument }[] = [];
 
+    // Placeholder timestamp used for incomplete indexing
+    const PLACEHOLDER_TIME = "1970-01-01T00:00:00.000Z";
+
     for (const driveDoc of driveDocs) {
       const storedDoc = storedDocs.get(driveDoc.id);
       if (!storedDoc) {
         toAdd.push(driveDoc);
-      } else if (driveDoc.modifiedTime > storedDoc.google_modified_time) {
+      } else if (
+        driveDoc.modifiedTime > storedDoc.google_modified_time ||
+        storedDoc.google_modified_time === PLACEHOLDER_TIME
+      ) {
+        // Re-index if: Google has newer version OR doc was partially indexed (has placeholder timestamp)
         toUpdate.push({ stored: storedDoc, drive: driveDoc });
       }
     }
