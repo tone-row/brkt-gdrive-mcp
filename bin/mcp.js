@@ -4,12 +4,30 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const API_URL = process.env.GDRIVE_API_URL || "https://brkt-gdrive-mcp.vercel.app";
-const API_KEY = process.env.GDRIVE_API_KEY;
+// Support both GDRIVE_API_KEY (new) and GDRIVE_MCP_URL (URL with key embedded)
+let API_URL = process.env.GDRIVE_API_URL || "https://brkt-gdrive-mcp.vercel.app";
+let API_KEY = process.env.GDRIVE_API_KEY;
+
+// Check if GDRIVE_MCP_URL is provided (URL with key embedded, e.g., https://app.com/mcp?key=gd_xxx)
+const MCP_URL = process.env.GDRIVE_MCP_URL;
+if (MCP_URL) {
+  try {
+    const url = new URL(MCP_URL);
+    const keyFromUrl = url.searchParams.get("key");
+    if (keyFromUrl) {
+      API_KEY = keyFromUrl;
+      // Remove the /mcp path and query params to get the base URL
+      API_URL = `${url.protocol}//${url.host}`;
+    }
+  } catch (e) {
+    console.error("Error: Invalid GDRIVE_MCP_URL format");
+    process.exit(1);
+  }
+}
 
 if (!API_KEY) {
-  console.error("Error: GDRIVE_API_KEY environment variable is required");
-  console.error("Get your API key at: https://brkt-gdrive-mcp.vercel.app");
+  console.error("Error: GDRIVE_API_KEY or GDRIVE_MCP_URL environment variable is required");
+  console.error("Get your credentials at: https://brkt-gdrive-mcp.vercel.app");
   process.exit(1);
 }
 

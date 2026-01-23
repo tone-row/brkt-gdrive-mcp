@@ -36,17 +36,6 @@ interface ApiKey {
   createdAt: string;
 }
 
-interface OAuthClient {
-  id: string;
-  name: string;
-  clientId: string;
-  clientIdPrefix: string;
-  createdAt: string;
-}
-
-interface NewOAuthClient extends OAuthClient {
-  clientSecret: string;
-}
 
 export default function Dashboard() {
   const router = useRouter();
@@ -64,12 +53,8 @@ export default function Dashboard() {
   const [keyCopied, setKeyCopied] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
 
-  // OAuth client state
-  const [oauthClients, setOauthClients] = useState<OAuthClient[]>([]);
-  const [newOAuthClientName, setNewOAuthClientName] = useState("");
-  const [creatingOAuthClient, setCreatingOAuthClient] = useState(false);
-  const [newlyCreatedOAuthClient, setNewlyCreatedOAuthClient] = useState<NewOAuthClient | null>(null);
-  const [oauthCopied, setOauthCopied] = useState<string | null>(null);
+  // URL copy state
+  const [urlCopied, setUrlCopied] = useState(false);
 
   useEffect(() => {
     if (!isPending && !session) {
@@ -81,7 +66,6 @@ export default function Dashboard() {
     if (session) {
       fetchStatus();
       fetchApiKeys();
-      fetchOAuthClients();
     }
   }, [session]);
 
@@ -270,63 +254,19 @@ export default function Dashboard() {
     }
   };
 
-  // OAuth client functions
-  const fetchOAuthClients = async () => {
-    try {
-      const res = await fetch("/api/oauth/clients");
-      if (res.ok) {
-        const data = await res.json();
-        setOauthClients(data.clients);
-      }
-    } catch (error) {
-      console.error("Failed to fetch OAuth clients:", error);
-    }
+  const getMcpServerUrl = (apiKey?: string) => {
+    const baseUrl = typeof window !== "undefined"
+      ? `${window.location.origin}/mcp`
+      : "https://brkt-gdrive-mcp.vercel.app/mcp";
+    return apiKey ? `${baseUrl}?key=${apiKey}` : baseUrl;
   };
 
-  const handleCreateOAuthClient = async () => {
-    if (!newOAuthClientName.trim()) return;
-    setCreatingOAuthClient(true);
-    try {
-      const res = await fetch("/api/oauth/clients", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newOAuthClientName.trim() }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setNewlyCreatedOAuthClient(data);
-        setNewOAuthClientName("");
-        fetchOAuthClients();
-      }
-    } catch (error) {
-      console.error("Create OAuth client error:", error);
-    } finally {
-      setCreatingOAuthClient(false);
+  const handleCopyMcpUrl = async () => {
+    if (newlyCreatedKey) {
+      await navigator.clipboard.writeText(getMcpServerUrl(newlyCreatedKey));
+      setUrlCopied(true);
+      setTimeout(() => setUrlCopied(false), 2000);
     }
-  };
-
-  const handleDeleteOAuthClient = async (clientId: string) => {
-    try {
-      const res = await fetch(`/api/oauth/clients/${clientId}`, { method: "DELETE" });
-      if (res.ok) {
-        fetchOAuthClients();
-      }
-    } catch (error) {
-      console.error("Delete OAuth client error:", error);
-    }
-  };
-
-  const handleCopyOAuthField = async (field: string, value: string) => {
-    await navigator.clipboard.writeText(value);
-    setOauthCopied(field);
-    setTimeout(() => setOauthCopied(null), 2000);
-  };
-
-  const getMcpServerUrl = () => {
-    if (typeof window !== "undefined") {
-      return `${window.location.origin}/mcp`;
-    }
-    return "https://brkt-gdrive-mcp.vercel.app/mcp";
   };
 
   if (isPending) {
@@ -516,141 +456,11 @@ export default function Dashboard() {
           </section>
         )}
 
-        {/* Claude Mobile/Web (OAuth) */}
+        {/* MCP Connection */}
         <section className="bg-white p-6 rounded-xl shadow-sm">
-          <h2 className="text-xl font-semibold mb-2">Claude Mobile &amp; Web</h2>
+          <h2 className="text-xl font-semibold mb-2">Connect to Claude</h2>
           <p className="text-gray-600 text-sm mb-4">
-            Connect to Claude on mobile or web using OAuth. Create credentials below, then add them as a custom connector in Claude settings.
-          </p>
-
-          <div className="flex gap-2 mb-4">
-            <input
-              type="text"
-              value={newOAuthClientName}
-              onChange={(e) => setNewOAuthClientName(e.target.value)}
-              placeholder="Connection name (e.g., Claude Mobile)"
-              className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              onClick={handleCreateOAuthClient}
-              disabled={creatingOAuthClient || !newOAuthClientName.trim()}
-              className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
-            >
-              {creatingOAuthClient ? "Creating..." : "Create"}
-            </button>
-          </div>
-
-          {newlyCreatedOAuthClient && (
-            <div className="bg-amber-50 border border-amber-400 rounded-lg p-4 mb-4">
-              <p className="text-amber-700 font-semibold text-sm mb-3">
-                Copy these credentials now - the Client Secret won&apos;t be shown again!
-              </p>
-              <p className="text-sm text-gray-600 mb-4">
-                Add these as a custom connector in Claude Mobile/Web settings:
-              </p>
-
-              <div className="space-y-3 mb-4">
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">Name</label>
-                  <div className="flex gap-2 mt-1">
-                    <code className="flex-1 p-2 bg-white border border-gray-200 rounded text-sm font-mono">
-                      {newlyCreatedOAuthClient.name}
-                    </code>
-                    <button
-                      onClick={() => handleCopyOAuthField("name", newlyCreatedOAuthClient.name)}
-                      className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-sm hover:bg-gray-200"
-                    >
-                      {oauthCopied === "name" ? "Copied!" : "Copy"}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">Remote MCP Server URL</label>
-                  <div className="flex gap-2 mt-1">
-                    <code className="flex-1 p-2 bg-white border border-gray-200 rounded text-sm font-mono break-all">
-                      {getMcpServerUrl()}
-                    </code>
-                    <button
-                      onClick={() => handleCopyOAuthField("url", getMcpServerUrl())}
-                      className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-sm hover:bg-gray-200"
-                    >
-                      {oauthCopied === "url" ? "Copied!" : "Copy"}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">OAuth Client ID</label>
-                  <div className="flex gap-2 mt-1">
-                    <code className="flex-1 p-2 bg-white border border-gray-200 rounded text-sm font-mono break-all">
-                      {newlyCreatedOAuthClient.clientId}
-                    </code>
-                    <button
-                      onClick={() => handleCopyOAuthField("clientId", newlyCreatedOAuthClient.clientId)}
-                      className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-sm hover:bg-gray-200"
-                    >
-                      {oauthCopied === "clientId" ? "Copied!" : "Copy"}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">OAuth Client Secret</label>
-                  <div className="flex gap-2 mt-1">
-                    <code className="flex-1 p-2 bg-white border border-gray-200 rounded text-sm font-mono break-all">
-                      {newlyCreatedOAuthClient.clientSecret}
-                    </code>
-                    <button
-                      onClick={() => handleCopyOAuthField("clientSecret", newlyCreatedOAuthClient.clientSecret)}
-                      className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-sm hover:bg-gray-200"
-                    >
-                      {oauthCopied === "clientSecret" ? "Copied!" : "Copy"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setNewlyCreatedOAuthClient(null)}
-                className="px-4 py-2 text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
-              >
-                I&apos;ve saved my credentials
-              </button>
-            </div>
-          )}
-
-          {oauthClients.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="font-medium text-sm mb-2">Your OAuth Clients</h3>
-              {oauthClients.map((client) => (
-                <div key={client.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                  <div>
-                    <p className="font-medium text-sm">{client.name}</p>
-                    <code className="text-xs text-gray-500 bg-gray-200 px-2 py-0.5 rounded">
-                      {client.clientIdPrefix}...
-                    </code>
-                    <p className="text-xs text-gray-400 mt-1">
-                      Created {new Date(client.createdAt).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => handleDeleteOAuthClient(client.id)}
-                    className="px-3 py-1.5 text-red-600 border border-red-600 rounded text-sm hover:bg-red-50"
-                  >
-                    Revoke
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* API Keys */}
-        <section className="bg-white p-6 rounded-xl shadow-sm">
-          <h2 className="text-xl font-semibold mb-2">API Keys (Desktop Apps)</h2>
-          <p className="text-gray-600 text-sm mb-4">
-            Generate an API key to use with the MCP server in Claude Desktop, Cursor, or other desktop AI tools.
+            Generate an API key to connect your Google Drive search to Claude Desktop, Claude Mobile, Cursor, or other AI tools.
           </p>
 
           <div className="flex gap-2 mb-4">
@@ -673,24 +483,62 @@ export default function Dashboard() {
           {newlyCreatedKey && (
             <div className="bg-amber-50 border border-amber-400 rounded-lg p-4 mb-4">
               <p className="text-amber-700 font-semibold text-sm mb-3">
-                Copy this key now - it won&apos;t be shown again!
+                Save these now - they won&apos;t be shown again!
               </p>
-              <div className="flex gap-2 mb-3">
-                <code className="flex-1 p-3 bg-white border border-gray-200 rounded text-xs font-mono break-all">
-                  {newlyCreatedKey}
-                </code>
-                <button
-                  onClick={handleCopyKey}
-                  className="px-4 py-2 bg-green-600 text-white rounded font-medium hover:bg-green-700"
-                >
-                  {keyCopied ? "Copied!" : "Copy"}
-                </button>
+
+              <div className="space-y-4">
+                {/* MCP URL for Claude Mobile/Web */}
+                <div>
+                  <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                    MCP Server URL (for Claude Mobile &amp; Web)
+                  </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Add this URL as a custom MCP connector in Claude settings
+                  </p>
+                  <div className="flex gap-2">
+                    <code className="flex-1 p-3 bg-white border border-gray-200 rounded text-xs font-mono break-all">
+                      {getMcpServerUrl(newlyCreatedKey)}
+                    </code>
+                    <button
+                      onClick={handleCopyMcpUrl}
+                      className="px-4 py-2 bg-green-600 text-white rounded font-medium hover:bg-green-700 whitespace-nowrap"
+                    >
+                      {urlCopied ? "Copied!" : "Copy URL"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Raw API Key for Desktop Apps */}
+                <div>
+                  <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                    API Key (for Claude Desktop &amp; other apps)
+                  </label>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Use with <code className="bg-gray-100 px-1 rounded">GDRIVE_API_KEY</code> environment variable
+                  </p>
+                  <div className="flex gap-2">
+                    <code className="flex-1 p-3 bg-white border border-gray-200 rounded text-xs font-mono break-all">
+                      {newlyCreatedKey}
+                    </code>
+                    <button
+                      onClick={handleCopyKey}
+                      className="px-4 py-2 bg-gray-600 text-white rounded font-medium hover:bg-gray-700 whitespace-nowrap"
+                    >
+                      {keyCopied ? "Copied!" : "Copy Key"}
+                    </button>
+                  </div>
+                </div>
               </div>
+
               <button
-                onClick={() => setNewlyCreatedKey(null)}
-                className="px-4 py-2 text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+                onClick={() => {
+                  setNewlyCreatedKey(null);
+                  setKeyCopied(false);
+                  setUrlCopied(false);
+                }}
+                className="mt-4 px-4 py-2 text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
               >
-                I&apos;ve saved my key
+                I&apos;ve saved my credentials
               </button>
             </div>
           )}
@@ -707,6 +555,7 @@ export default function Dashboard() {
                     </code>
                     <p className="text-xs text-gray-400 mt-1">
                       Created {new Date(key.createdAt).toLocaleDateString()}
+                      {key.lastUsedAt && ` · Last used ${new Date(key.lastUsedAt).toLocaleDateString()}`}
                     </p>
                   </div>
                   <button
@@ -719,6 +568,15 @@ export default function Dashboard() {
               ))}
             </div>
           )}
+
+          {/* Setup instructions */}
+          <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+            <h3 className="font-medium text-sm mb-2">Setup Instructions</h3>
+            <div className="text-xs text-gray-600 space-y-2">
+              <p><strong>Claude Mobile &amp; Web:</strong> Go to Settings → Integrations → Add custom MCP connector. Paste the MCP Server URL.</p>
+              <p><strong>Claude Desktop:</strong> Add the API key to your environment as <code className="bg-gray-200 px-1 rounded">GDRIVE_API_KEY</code>.</p>
+            </div>
+          </div>
         </section>
       </main>
     </div>
