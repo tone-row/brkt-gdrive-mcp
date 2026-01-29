@@ -33,6 +33,7 @@ export const account = sqliteTable("accounts", {
   accessToken: text("access_token"),
   refreshToken: text("refresh_token"),
   accessTokenExpiresAt: text("access_token_expires_at"),
+  refreshTokenExpiresAt: text("refresh_token_expires_at"),
   scope: text("scope"),
   idToken: text("id_token"),
   createdAt: text("created_at").notNull(),

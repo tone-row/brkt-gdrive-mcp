@@ -43,6 +43,7 @@ export async function runMigrations() {
       access_token TEXT,
       refresh_token TEXT,
       access_token_expires_at TEXT,
+      refresh_token_expires_at TEXT,
       scope TEXT,
       id_token TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -50,6 +51,13 @@ export async function runMigrations() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
+
+  // Add refresh_token_expires_at column if missing (Better Auth v1.4.12+ requirement)
+  await db.execute(`
+    ALTER TABLE accounts ADD COLUMN refresh_token_expires_at TEXT
+  `).catch(() => {
+    // Column already exists, ignore error
+  });
 
   // Verification tokens table (Better Auth)
   await db.execute(`
