@@ -10,6 +10,29 @@ interface SyncStatusInfo {
   completedAt: string | null;
   lastResult: { added: number; updated: number; deleted: number } | null;
   error: string | null;
+  progress?: {
+    totalFiles: number;
+    filesProcessed: number;
+    filesFailed: number;
+    percentComplete: number;
+  } | null;
+}
+
+interface FileJob {
+  id: string;
+  fileName: string;
+  status: "pending" | "processing" | "completed" | "failed" | "skipped";
+  error: string | null;
+  completedAt: string | null;
+}
+
+interface FileSummary {
+  total: number;
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  skipped: number;
 }
 
 interface UserStatus {
@@ -56,6 +79,12 @@ export default function Dashboard() {
   // URL copy state
   const [urlCopied, setUrlCopied] = useState(false);
 
+  // File list state for sync progress
+  const [fileJobs, setFileJobs] = useState<FileJob[]>([]);
+  const [fileSummary, setFileSummary] = useState<FileSummary | null>(null);
+  const [showFiles, setShowFiles] = useState(false);
+  const [showAllFiles, setShowAllFiles] = useState(false);
+
   useEffect(() => {
     if (!isPending && !session) {
       router.push("/login");
@@ -73,6 +102,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (status?.syncStatus?.status === "syncing" && !syncing) {
       setSyncing(true);
+      fetchFileJobs(); // Fetch file jobs immediately
       pollSyncStatus();
     }
   }, [status?.syncStatus?.status]);
@@ -86,6 +116,19 @@ export default function Dashboard() {
       }
     } catch (error) {
       console.error("Failed to fetch status:", error);
+    }
+  };
+
+  const fetchFileJobs = async () => {
+    try {
+      const res = await fetch("/api/me/sync/files");
+      if (res.ok) {
+        const data = await res.json();
+        setFileJobs(data.files);
+        setFileSummary(data.summary);
+      }
+    } catch (error) {
+      console.error("Failed to fetch file jobs:", error);
     }
   };
 
@@ -139,6 +182,10 @@ export default function Dashboard() {
   const handleSync = async () => {
     setSyncing(true);
     setSyncResult(null);
+    setFileJobs([]);
+    setFileSummary(null);
+    setShowFiles(false);
+    setShowAllFiles(false);
     try {
       const res = await fetch("/api/me/sync", { method: "POST" });
       const data = await res.json();
@@ -163,9 +210,14 @@ export default function Dashboard() {
   const pollSyncStatus = async () => {
     const poll = async () => {
       try {
-        const res = await fetch("/api/me/status");
-        if (res.ok) {
-          const data = await res.json();
+        // Fetch both status and file jobs in parallel
+        const [statusRes, filesRes] = await Promise.all([
+          fetch("/api/me/status"),
+          fetch("/api/me/sync/files"),
+        ]);
+
+        if (statusRes.ok) {
+          const data = await statusRes.json();
           setStatus(data);
 
           if (data.syncStatus?.status === "syncing") {
@@ -181,6 +233,12 @@ export default function Dashboard() {
               setSyncResult(`Sync complete: +${r.added} added, ~${r.updated} updated, -${r.deleted} deleted`);
             }
           }
+        }
+
+        if (filesRes.ok) {
+          const filesData = await filesRes.json();
+          setFileJobs(filesData.files);
+          setFileSummary(filesData.summary);
         }
       } catch (error) {
         console.error("Failed to poll status:", error);
@@ -367,14 +425,115 @@ export default function Dashboard() {
 
             {/* Sync Status Info */}
             {status.syncStatus && (
-              <div className="mb-4 p-3 bg-gray-50 rounded-lg text-sm">
+              <div className="mb-4 p-4 bg-gray-50 rounded-lg text-sm">
                 {status.syncStatus.status === "syncing" && (
-                  <div className="flex items-center gap-2 text-blue-600">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                    </svg>
-                    <span>Sync in progress...</span>
+                  <div className="space-y-3">
+                    {/* Header with spinner */}
+                    <div className="flex items-center gap-2 text-blue-600">
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      <span className="font-medium">Syncing your documents...</span>
+                    </div>
+
+                    {/* Progress bar with file counts */}
+                    {status.syncStatus.progress && status.syncStatus.progress.totalFiles > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-xs text-gray-600">
+                          <span>
+                            {status.syncStatus.progress.filesProcessed} of {status.syncStatus.progress.totalFiles} files
+                          </span>
+                          <span>{status.syncStatus.progress.percentComplete}%</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2.5">
+                          <div
+                            className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+                            style={{ width: `${status.syncStatus.progress.percentComplete}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Expandable file list */}
+                    {fileSummary && fileSummary.total > 0 && (
+                      <div className="pt-2">
+                        <button
+                          onClick={() => setShowFiles(!showFiles)}
+                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
+                        >
+                          <span className="text-base">{showFiles ? "▼" : "▶"}</span>
+                          <span>{showFiles ? "Hide files" : "Show files"}</span>
+                        </button>
+
+                        {showFiles && fileJobs.length > 0 && (
+                          <div className="mt-3 space-y-1 max-h-64 overflow-y-auto">
+                            {(showAllFiles ? fileJobs : fileJobs.slice(0, 10)).map((file) => (
+                              <div key={file.id} className="flex items-start gap-2 text-xs">
+                                {file.status === "processing" && (
+                                  <span className="text-blue-500 flex-shrink-0">
+                                    <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                    </svg>
+                                  </span>
+                                )}
+                                {file.status === "pending" && (
+                                  <span className="text-gray-400 flex-shrink-0">○</span>
+                                )}
+                                {file.status === "completed" && (
+                                  <span className="text-green-500 flex-shrink-0">✓</span>
+                                )}
+                                {file.status === "failed" && (
+                                  <span className="text-red-500 flex-shrink-0">✗</span>
+                                )}
+                                {file.status === "skipped" && (
+                                  <span className="text-gray-400 flex-shrink-0">−</span>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <span
+                                    className={`block truncate ${
+                                      file.status === "processing"
+                                        ? "text-blue-600 font-medium"
+                                        : file.status === "failed"
+                                        ? "text-red-600"
+                                        : file.status === "completed"
+                                        ? "text-gray-600"
+                                        : "text-gray-500"
+                                    }`}
+                                  >
+                                    {file.status === "processing" && "Processing: "}
+                                    {file.status === "pending" && "Pending: "}
+                                    {file.fileName}
+                                  </span>
+                                  {file.status === "failed" && file.error && (
+                                    <span className="block text-red-500 text-xs pl-2 mt-0.5">
+                                      └─ {file.error}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                            {!showAllFiles && fileJobs.length > 10 && (
+                              <button
+                                onClick={() => setShowAllFiles(true)}
+                                className="text-xs text-blue-600 hover:text-blue-800 mt-2"
+                              >
+                                ... and {fileJobs.length - 10} more
+                              </button>
+                            )}
+                            {showAllFiles && fileJobs.length > 10 && (
+                              <button
+                                onClick={() => setShowAllFiles(false)}
+                                className="text-xs text-blue-600 hover:text-blue-800 mt-2"
+                              >
+                                Show less
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
                 {status.syncStatus.status === "failed" && status.syncStatus.error && (
