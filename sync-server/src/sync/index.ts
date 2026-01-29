@@ -2,7 +2,17 @@ import { db } from "../db/client";
 import { listGoogleDocs, exportDocAsText, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
 import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
-import { markSyncStarted, markSyncCompleted, markSyncFailed } from "./status";
+import {
+  markSyncStarted,
+  markSyncCompleted,
+  markSyncFailed,
+  setV2Processing,
+  updateV2Progress,
+  createFileJobs,
+  markFileProcessing,
+  markFileCompleted,
+  markFileFailed,
+} from "./status";
 import { v4 as uuid } from "uuid";
 import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessFromV2 } from "./dual-write";
 
@@ -439,19 +449,50 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
 
     console.log(`  Sync plan: +${toAdd.length} add, ~${toUpdate.length} update, -${toDelete.length} delete`);
 
+    // Create file jobs for progress tracking
+    const allFilesToProcess = [
+      ...toAdd.map((d) => ({ id: d.id, name: d.name, mimeType: d.mimeType, modifiedTime: d.modifiedTime })),
+      ...toUpdate.map(({ drive: d }) => ({ id: d.id, name: d.name, mimeType: d.mimeType, modifiedTime: d.modifiedTime })),
+    ];
+    await createFileJobs(user.userId, allFilesToProcess);
+    await setV2Processing(user.userId, allFilesToProcess.length);
+
+    let filesProcessed = 0;
+    let filesFailed = 0;
+
     for (const doc of toDelete) {
       await deleteDocument(doc, user.userId);
     }
 
     for (const doc of toAdd) {
-      await indexDocument(user.userId, activeTokens, doc);
+      try {
+        await markFileProcessing(user.userId, doc.id);
+        await indexDocument(user.userId, activeTokens, doc);
+        await markFileCompleted(user.userId, doc.id);
+        filesProcessed++;
+      } catch (e: any) {
+        await markFileFailed(user.userId, doc.id, e.message || "Unknown error");
+        filesFailed++;
+        console.error(`    Failed to index ${doc.name}: ${e.message}`);
+      }
+      await updateV2Progress(user.userId, filesProcessed, filesFailed);
     }
 
     for (const { stored, drive } of toUpdate) {
-      await updateDocument(user.userId, activeTokens, stored, drive);
+      try {
+        await markFileProcessing(user.userId, drive.id);
+        await updateDocument(user.userId, activeTokens, stored, drive);
+        await markFileCompleted(user.userId, drive.id);
+        filesProcessed++;
+      } catch (e: any) {
+        await markFileFailed(user.userId, drive.id, e.message || "Unknown error");
+        filesFailed++;
+        console.error(`    Failed to update ${drive.name}: ${e.message}`);
+      }
+      await updateV2Progress(user.userId, filesProcessed, filesFailed);
     }
 
-    const result = { added: toAdd.length, updated: toUpdate.length, deleted: toDelete.length };
+    const result = { added: toAdd.length - filesFailed, updated: toUpdate.length, deleted: toDelete.length };
     await markSyncCompleted(user.userId, result);
     return result;
 
