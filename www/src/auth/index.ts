@@ -16,6 +16,12 @@ export const auth = betterAuth({
     provider: "sqlite",
     schema: authSchema,
   }),
+  account: {
+    accountLinking: {
+      enabled: true,
+      trustedProviders: ["google"],
+    },
+  },
   emailAndPassword: {
     enabled: true,
   },
