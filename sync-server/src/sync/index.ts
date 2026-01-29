@@ -4,6 +4,21 @@ import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
 import { markSyncStarted, markSyncCompleted, markSyncFailed } from "./status";
 import { v4 as uuid } from "uuid";
+import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessFromV2 } from "./dual-write";
+
+// Flag to enable/disable dual-write to V2 tables
+// Set to true after running Phase 1 and Phase 2 migrations
+let dualWriteEnabled: boolean | null = null;
+
+async function isDualWriteEnabled(): Promise<boolean> {
+  if (dualWriteEnabled === null) {
+    dualWriteEnabled = await v2TablesExist();
+    if (dualWriteEnabled) {
+      console.log("[Dual-Write] V2 tables detected, dual-write enabled");
+    }
+  }
+  return dualWriteEnabled;
+}
 
 // Safety threshold: if we have more than this many docs in DB but Google returns 0,
 // something is likely wrong - don't delete anything
@@ -173,6 +188,9 @@ async function indexDocument(
     args: [docId, userId, doc.id, doc.name, text, PLACEHOLDER_TIME],
   });
 
+  // Collect all chunks with embeddings for dual-write
+  const allChunksWithEmbeddings: Array<{ index: number; text: string; embedding: number[] }> = [];
+
   // Process chunks in small batches to reduce memory usage
   const CHUNK_BATCH_SIZE = 10;
   for (let i = 0; i < chunks.length; i += CHUNK_BATCH_SIZE) {
@@ -194,6 +212,13 @@ async function indexDocument(
           `[${batchEmbeddings[j]!.join(",")}]`,
         ],
       });
+
+      // Collect for dual-write
+      allChunksWithEmbeddings.push({
+        index: batchChunks[j]!.index,
+        text: batchChunks[j]!.text,
+        embedding: batchEmbeddings[j]!,
+      });
     }
   }
 
@@ -204,6 +229,11 @@ async function indexDocument(
   });
 
   console.log(`    Indexed ${chunks.length} chunks successfully`);
+
+  // Dual-write to V2 tables (non-blocking, errors are logged but don't fail sync)
+  if (await isDualWriteEnabled()) {
+    await writeDocumentToV2(userId, doc.id, doc.name, text, doc.modifiedTime, allChunksWithEmbeddings);
+  }
 }
 
 async function updateDocument(
@@ -227,6 +257,10 @@ async function updateDocument(
       sql: "DELETE FROM documents WHERE id = ?",
       args: [storedDoc.id],
     });
+    // Also remove from V2 if dual-write is enabled
+    if (await isDualWriteEnabled()) {
+      await removeUserAccessFromV2(userId, driveDoc.id);
+    }
     return;
   }
 
@@ -242,6 +276,9 @@ async function updateDocument(
           WHERE id = ?`,
     args: [driveDoc.name, text, storedDoc.id],
   });
+
+  // Collect all chunks with embeddings for dual-write
+  const allChunksWithEmbeddings: Array<{ index: number; text: string; embedding: number[] }> = [];
 
   // Process chunks in small batches to reduce memory usage
   const CHUNK_BATCH_SIZE = 10;
@@ -264,6 +301,13 @@ async function updateDocument(
           `[${batchEmbeddings[j]!.join(",")}]`,
         ],
       });
+
+      // Collect for dual-write
+      allChunksWithEmbeddings.push({
+        index: batchChunks[j]!.index,
+        text: batchChunks[j]!.text,
+        embedding: batchEmbeddings[j]!,
+      });
     }
   }
 
@@ -274,9 +318,14 @@ async function updateDocument(
   });
 
   console.log(`    Updated ${chunks.length} chunks successfully`);
+
+  // Dual-write to V2 tables (non-blocking, errors are logged but don't fail sync)
+  if (await isDualWriteEnabled()) {
+    await updateDocumentInV2(userId, driveDoc.id, driveDoc.name, text, driveDoc.modifiedTime, allChunksWithEmbeddings);
+  }
 }
 
-async function deleteDocument(storedDoc: StoredDocument): Promise<void> {
+async function deleteDocument(storedDoc: StoredDocument, userId: string): Promise<void> {
   console.log(`  Deleting document: ${storedDoc.google_doc_id}`);
 
   await db.execute({
@@ -285,6 +334,11 @@ async function deleteDocument(storedDoc: StoredDocument): Promise<void> {
   });
 
   console.log(`    Deleted successfully`);
+
+  // Also remove from V2 if dual-write is enabled
+  if (await isDualWriteEnabled()) {
+    await removeUserAccessFromV2(userId, storedDoc.google_doc_id);
+  }
 }
 
 /**
@@ -386,7 +440,7 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     console.log(`  Sync plan: +${toAdd.length} add, ~${toUpdate.length} update, -${toDelete.length} delete`);
 
     for (const doc of toDelete) {
-      await deleteDocument(doc);
+      await deleteDocument(doc, user.userId);
     }
 
     for (const doc of toAdd) {
