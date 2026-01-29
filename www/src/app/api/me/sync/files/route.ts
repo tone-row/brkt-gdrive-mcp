@@ -33,7 +33,7 @@ export async function GET(request: NextRequest) {
           id,
           file_name,
           status,
-          error_message,
+          error,
           completed_at
         FROM file_jobs
         WHERE user_id = ?
@@ -54,7 +54,7 @@ export async function GET(request: NextRequest) {
       id: String(row.id),
       fileName: (row.file_name as string) || "Unknown file",
       status: row.status as FileJob["status"],
-      error: (row.error_message as string) || null,
+      error: (row.error as string) || null,
       completedAt: (row.completed_at as string) || null,
     }));
 
