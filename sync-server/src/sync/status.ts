@@ -239,6 +239,21 @@ export async function markFileFailed(userId: string, googleFileId: string, error
   }
 }
 
+/**
+ * Mark a file job as skipped (file too large, scanned PDF with no text, etc.)
+ */
+export async function markFileSkipped(userId: string, googleFileId: string, reason: string): Promise<void> {
+  try {
+    await db.execute({
+      sql: `UPDATE file_jobs SET status = 'skipped', completed_at = datetime('now'), error = ?
+            WHERE user_id = ? AND google_file_id = ?`,
+      args: [reason, userId, googleFileId],
+    });
+  } catch (e) {
+    // Table might not exist, ignore
+  }
+}
+
 // If a sync has been running longer than this, consider it stale
 // Note: Fly.io auto-stops machines after ~5 minutes of no active HTTP connections,
 // so if sync takes longer than that, the machine gets killed and status stays "syncing".

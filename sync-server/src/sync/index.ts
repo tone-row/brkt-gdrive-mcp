@@ -1,5 +1,6 @@
 import { db } from "../db/client";
-import { listGoogleDocs, exportDocAsText, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
+import { listSupportedFiles, exportDocAsText, downloadFile, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
+import { extractTextFromPdf, extractTextFromDocx, extractTextFromDoc } from "./extractors";
 import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
 import {
@@ -12,9 +13,59 @@ import {
   markFileProcessing,
   markFileCompleted,
   markFileFailed,
+  markFileSkipped,
 } from "./status";
 import { v4 as uuid } from "uuid";
 import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessFromV2 } from "./dual-write";
+
+// Maximum file size for processing (10 MB)
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+// Result type for text extraction
+type ExtractResult =
+  | { success: true; text: string }
+  | { success: false; skip: true; reason: string }
+  | { success: false; skip: false; error: string };
+
+/**
+ * Extract text from a file based on its MIME type
+ */
+async function extractText(tokens: GoogleTokens, file: DriveDocument): Promise<ExtractResult> {
+  // Skip files over 10 MB (Google Docs don't have size, always process them)
+  if (file.size && file.size > MAX_FILE_SIZE_BYTES) {
+    const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+    return { success: false, skip: true, reason: `File too large (${sizeMb} MB, max 10 MB)` };
+  }
+
+  switch (file.mimeType) {
+    case "application/vnd.google-apps.document":
+      return { success: true, text: await exportDocAsText(tokens, file.id) };
+
+    case "application/pdf": {
+      const pdfBuffer = await downloadFile(tokens, file.id);
+      const pdfText = await extractTextFromPdf(pdfBuffer);
+      if (!pdfText.trim()) {
+        return { success: false, skip: true, reason: "PDF has no extractable text (may be scanned)" };
+      }
+      return { success: true, text: pdfText };
+    }
+
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
+      const docxBuffer = await downloadFile(tokens, file.id);
+      const docxText = await extractTextFromDocx(docxBuffer);
+      return { success: true, text: docxText };
+    }
+
+    case "application/msword": {
+      const docBuffer = await downloadFile(tokens, file.id);
+      const docText = await extractTextFromDoc(docBuffer);
+      return { success: true, text: docText };
+    }
+
+    default:
+      return { success: false, skip: false, error: `Unsupported file type: ${file.mimeType}` };
+  }
+}
 
 // Flag to enable/disable dual-write to V2 tables
 // Set to true after running Phase 1 and Phase 2 migrations
@@ -175,13 +226,22 @@ async function indexDocument(
   userId: string,
   tokens: GoogleTokens,
   doc: DriveDocument
-): Promise<void> {
+): Promise<{ indexed: boolean; skipped?: boolean; skipReason?: string }> {
   console.log(`  Indexing: ${doc.name}`);
 
-  const text = await exportDocAsText(tokens, doc.id);
+  const result = await extractText(tokens, doc);
+  if (!result.success) {
+    if (result.skip) {
+      console.log(`    Skipping: ${result.reason}`);
+      return { indexed: false, skipped: true, skipReason: result.reason };
+    }
+    throw new Error(result.error);
+  }
+
+  const text = result.text;
   if (!text || text.trim().length === 0) {
     console.log(`    Skipping empty document: ${doc.name}`);
-    return;
+    return { indexed: false, skipped: true, skipReason: "Document is empty" };
   }
 
   const chunks = chunkText(text);
@@ -244,6 +304,8 @@ async function indexDocument(
   if (await isDualWriteEnabled()) {
     await writeDocumentToV2(userId, doc.id, doc.name, text, doc.modifiedTime, allChunksWithEmbeddings);
   }
+
+  return { indexed: true };
 }
 
 async function updateDocument(
@@ -251,16 +313,27 @@ async function updateDocument(
   tokens: GoogleTokens,
   storedDoc: StoredDocument,
   driveDoc: DriveDocument
-): Promise<void> {
+): Promise<{ updated: boolean; skipped?: boolean; skipReason?: string }> {
   console.log(`  Updating: ${driveDoc.name}`);
 
-  // Delete old chunks first
-  await db.execute({
-    sql: "DELETE FROM chunks WHERE document_id = ?",
-    args: [storedDoc.id],
-  });
+  const result = await extractText(tokens, driveDoc);
+  if (!result.success) {
+    if (result.skip) {
+      console.log(`    Skipping: ${result.reason}`);
+      // Delete the stored doc since we can no longer process this file
+      await db.execute({
+        sql: "DELETE FROM documents WHERE id = ?",
+        args: [storedDoc.id],
+      });
+      if (await isDualWriteEnabled()) {
+        await removeUserAccessFromV2(userId, driveDoc.id);
+      }
+      return { updated: false, skipped: true, skipReason: result.reason };
+    }
+    throw new Error(result.error);
+  }
 
-  const text = await exportDocAsText(tokens, driveDoc.id);
+  const text = result.text;
   if (!text || text.trim().length === 0) {
     console.log(`    Skipping empty document: ${driveDoc.name}`);
     await db.execute({
@@ -271,8 +344,14 @@ async function updateDocument(
     if (await isDualWriteEnabled()) {
       await removeUserAccessFromV2(userId, driveDoc.id);
     }
-    return;
+    return { updated: false, skipped: true, skipReason: "Document is empty" };
   }
+
+  // Delete old chunks first
+  await db.execute({
+    sql: "DELETE FROM chunks WHERE document_id = ?",
+    args: [storedDoc.id],
+  });
 
   const chunks = chunkText(text);
   console.log(`    Created ${chunks.length} chunks`);
@@ -333,6 +412,8 @@ async function updateDocument(
   if (await isDualWriteEnabled()) {
     await updateDocumentInV2(userId, driveDoc.id, driveDoc.name, text, driveDoc.modifiedTime, allChunksWithEmbeddings);
   }
+
+  return { updated: true };
 }
 
 async function deleteDocument(storedDoc: StoredDocument, userId: string): Promise<void> {
@@ -388,9 +469,9 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
 
     let driveDocs: DriveDocument[];
     try {
-      driveDocs = await listGoogleDocs(activeTokens);
+      driveDocs = await listSupportedFiles(activeTokens);
     } catch (error: any) {
-      console.error(`  Failed to fetch Google Drive docs: ${error.message}`);
+      console.error(`  Failed to fetch Google Drive files: ${error.message}`);
       console.log(`  Preserving ${storedDocs.size} existing documents (no deletions on API failure)`);
 
       // Check if this is an auth error and mark account for re-auth
@@ -406,7 +487,7 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
       }
       return { added: 0, updated: 0, deleted: 0, authFailed: true };
     }
-    console.log(`  Found ${driveDocs.length} documents in Google Drive`);
+    console.log(`  Found ${driveDocs.length} supported files in Google Drive`);
 
     const driveDocIds = new Set(driveDocs.map((d) => d.id));
 
@@ -459,6 +540,9 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
 
     let filesProcessed = 0;
     let filesFailed = 0;
+    let filesSkipped = 0;
+    let filesAdded = 0;
+    let filesUpdated = 0;
 
     for (const doc of toDelete) {
       await deleteDocument(doc, user.userId);
@@ -467,8 +551,14 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     for (const doc of toAdd) {
       try {
         await markFileProcessing(user.userId, doc.id);
-        await indexDocument(user.userId, activeTokens, doc);
-        await markFileCompleted(user.userId, doc.id);
+        const indexResult = await indexDocument(user.userId, activeTokens, doc);
+        if (indexResult.skipped) {
+          await markFileSkipped(user.userId, doc.id, indexResult.skipReason || "Skipped");
+          filesSkipped++;
+        } else {
+          await markFileCompleted(user.userId, doc.id);
+          filesAdded++;
+        }
         filesProcessed++;
       } catch (e: any) {
         await markFileFailed(user.userId, doc.id, e.message || "Unknown error");
@@ -481,8 +571,14 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     for (const { stored, drive } of toUpdate) {
       try {
         await markFileProcessing(user.userId, drive.id);
-        await updateDocument(user.userId, activeTokens, stored, drive);
-        await markFileCompleted(user.userId, drive.id);
+        const updateResult = await updateDocument(user.userId, activeTokens, stored, drive);
+        if (updateResult.skipped) {
+          await markFileSkipped(user.userId, drive.id, updateResult.skipReason || "Skipped");
+          filesSkipped++;
+        } else {
+          await markFileCompleted(user.userId, drive.id);
+          filesUpdated++;
+        }
         filesProcessed++;
       } catch (e: any) {
         await markFileFailed(user.userId, drive.id, e.message || "Unknown error");
@@ -492,7 +588,7 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
       await updateV2Progress(user.userId, filesProcessed, filesFailed);
     }
 
-    const result = { added: toAdd.length - filesFailed, updated: toUpdate.length, deleted: toDelete.length };
+    const result = { added: filesAdded, updated: filesUpdated, deleted: toDelete.length };
     await markSyncCompleted(user.userId, result);
     return result;
 

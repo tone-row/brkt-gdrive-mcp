@@ -4,16 +4,22 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/server.ts",
-    "dev": "bun --watch run src/server.ts"
+    "dev": "bun --watch run src/server.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0",
     "googleapis": "^146.0.0",
+    "mammoth": "^1.11.0",
     "openai": "^4.103.0",
-    "uuid": "^11.1.0"
+    "pdf-parse": "^2.4.5",
+    "uuid": "^11.1.0",
+    "word-extractor": "^1.0.4"
   },
   "devDependencies": {
     "@types/bun": "^1.2.9",
-    "@types/uuid": "^10.0.0"
+    "@types/pdf-parse": "^1.1.5",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.9.3"
   }
 }

@@ -18,6 +18,7 @@ export interface DriveDocument {
   name: string;
   modifiedTime: string;
   mimeType: string;
+  size?: number; // bytes, null for Google Docs
 }
 
 /**
@@ -93,20 +94,31 @@ export async function refreshTokensIfNeeded(tokens: GoogleTokens): Promise<Refre
   }
 }
 
+// Supported MIME types for indexing
+export const SUPPORTED_MIME_TYPES = [
+  "application/vnd.google-apps.document", // Google Docs
+  "application/pdf", // PDF files
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // DOCX
+  "application/msword", // DOC (legacy)
+];
+
 /**
- * List all Google Docs the user has access to
+ * List all supported files the user has access to (Google Docs, PDFs, DOCX, DOC)
  */
-export async function listGoogleDocs(tokens: GoogleTokens): Promise<DriveDocument[]> {
+export async function listSupportedFiles(tokens: GoogleTokens): Promise<DriveDocument[]> {
   const auth = getOAuthClient(tokens);
   const drive = google.drive({ version: "v3", auth });
 
   const documents: DriveDocument[] = [];
   let pageToken: string | undefined;
 
+  // Build MIME type query
+  const mimeQuery = SUPPORTED_MIME_TYPES.map((m) => `mimeType='${m}'`).join(" or ");
+
   do {
     const response = await drive.files.list({
-      q: "mimeType='application/vnd.google-apps.document' and trashed=false",
-      fields: "nextPageToken, files(id, name, modifiedTime, mimeType)",
+      q: `(${mimeQuery}) and trashed=false`,
+      fields: "nextPageToken, files(id, name, modifiedTime, mimeType, size)",
       pageSize: 100,
       pageToken,
     });
@@ -119,6 +131,7 @@ export async function listGoogleDocs(tokens: GoogleTokens): Promise<DriveDocumen
             name: file.name,
             modifiedTime: file.modifiedTime,
             mimeType: file.mimeType,
+            size: file.size ? parseInt(file.size, 10) : undefined,
           });
         }
       }
@@ -129,6 +142,11 @@ export async function listGoogleDocs(tokens: GoogleTokens): Promise<DriveDocumen
 
   return documents;
 }
+
+/**
+ * @deprecated Use listSupportedFiles instead
+ */
+export const listGoogleDocs = listSupportedFiles;
 
 /**
  * Export a Google Doc as plain text
@@ -143,4 +161,19 @@ export async function exportDocAsText(tokens: GoogleTokens, docId: string): Prom
   });
 
   return response.data as string;
+}
+
+/**
+ * Download an uploaded file (PDF, DOCX, DOC) as binary
+ */
+export async function downloadFile(tokens: GoogleTokens, fileId: string): Promise<Buffer> {
+  const auth = getOAuthClient(tokens);
+  const drive = google.drive({ version: "v3", auth });
+
+  const response = await drive.files.get(
+    { fileId, alt: "media" },
+    { responseType: "arraybuffer" }
+  );
+
+  return Buffer.from(response.data as ArrayBuffer);
 }
