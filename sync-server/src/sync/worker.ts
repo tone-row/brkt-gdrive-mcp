@@ -20,8 +20,8 @@ import type { DriveDocument } from "./google-drive";
 // Heartbeat interval: workers send heartbeat every 30 seconds
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 
-// Heartbeat timeout: if no heartbeat for 2 minutes, worker is considered dead
-export const HEARTBEAT_TIMEOUT_SECONDS = 120;
+// Heartbeat timeout: if no heartbeat for 4 minutes, worker is considered dead
+export const HEARTBEAT_TIMEOUT_SECONDS = 240;
 
 // Max retry count for failed jobs
 export const MAX_RETRY_COUNT = 3;

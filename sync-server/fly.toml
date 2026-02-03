@@ -10,12 +10,9 @@ primary_region = 'sjc'
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  # Note: With min_machines_running = 0 and auto_stop = 'stop', Fly.io will stop
-  # the machine after ~5 min of no HTTP activity. Since /sync returns immediately
-  # and runs sync in background, long syncs may get killed. The sync status has
-  # a 5-minute stale timeout to handle this. For reliability with many docs,
-  # consider setting min_machines_running = 1 (keeps machine always running).
-  min_machines_running = 0
+  # Keep one machine running to prevent Fly.io from killing long-running syncs.
+  # Cost: ~$3-5/month for 512MB shared-cpu-1x running 24/7.
+  min_machines_running = 1
   processes = ['app']
 
 [[vm]]

@@ -255,10 +255,9 @@ export async function markFileSkipped(userId: string, googleFileId: string, reas
 }
 
 // If a sync has been running longer than this, consider it stale
-// Note: Fly.io auto-stops machines after ~5 minutes of no active HTTP connections,
-// so if sync takes longer than that, the machine gets killed and status stays "syncing".
-// Setting this to 5 minutes allows users to retry sooner.
-const SYNC_TIMEOUT_MINUTES = 5;
+// Note: With min_machines_running = 1 in fly.toml, the machine stays alive during syncs.
+// 10 minutes allows enough time for large document syncs.
+const SYNC_TIMEOUT_MINUTES = 10;
 
 /**
  * Mark a sync as started. Returns false if a sync is already in progress.
