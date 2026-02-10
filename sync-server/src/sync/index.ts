@@ -1,6 +1,6 @@
 import { db } from "../db/client";
-import { listSupportedFiles, exportDocAsText, downloadFile, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
-import { extractTextFromPdf, extractTextFromDocx, extractTextFromDoc } from "./extractors";
+import { listSupportedFiles, exportDocAsText, exportSheetAsXlsx, downloadFile, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
+import { extractTextFromPdf, extractTextFromDocx, extractTextFromDoc, extractTextFromSpreadsheet } from "./extractors";
 import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
 import {
@@ -61,6 +61,25 @@ async function extractText(tokens: GoogleTokens, file: DriveDocument): Promise<E
       const docBuffer = await downloadFile(tokens, file.id);
       const docText = await extractTextFromDoc(docBuffer);
       return { success: true, text: docText };
+    }
+
+    case "application/vnd.google-apps.spreadsheet": {
+      const xlsxBuffer = await exportSheetAsXlsx(tokens, file.id);
+      const sheetText = extractTextFromSpreadsheet(xlsxBuffer);
+      if (!sheetText.trim()) {
+        return { success: false, skip: true, reason: "Spreadsheet is empty" };
+      }
+      return { success: true, text: sheetText };
+    }
+
+    case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+    case "application/vnd.ms-excel": {
+      const spreadsheetBuffer = await downloadFile(tokens, file.id);
+      const spreadsheetText = extractTextFromSpreadsheet(spreadsheetBuffer);
+      if (!spreadsheetText.trim()) {
+        return { success: false, skip: true, reason: "Spreadsheet is empty" };
+      }
+      return { success: true, text: spreadsheetText };
     }
 
     default:

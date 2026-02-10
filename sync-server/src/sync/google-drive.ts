@@ -97,9 +97,12 @@ export async function refreshTokensIfNeeded(tokens: GoogleTokens): Promise<Refre
 // Supported MIME types for indexing
 export const SUPPORTED_MIME_TYPES = [
   "application/vnd.google-apps.document", // Google Docs
+  "application/vnd.google-apps.spreadsheet", // Google Sheets
   "application/pdf", // PDF files
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // DOCX
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // XLSX
   "application/msword", // DOC (legacy)
+  "application/vnd.ms-excel", // XLS (legacy)
 ];
 
 /**
@@ -164,7 +167,22 @@ export async function exportDocAsText(tokens: GoogleTokens, docId: string): Prom
 }
 
 /**
- * Download an uploaded file (PDF, DOCX, DOC) as binary
+ * Export a Google Sheet as XLSX binary
+ */
+export async function exportSheetAsXlsx(tokens: GoogleTokens, fileId: string): Promise<Buffer> {
+  const auth = getOAuthClient(tokens);
+  const drive = google.drive({ version: "v3", auth });
+
+  const response = await drive.files.export(
+    { fileId, mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    { responseType: "arraybuffer" }
+  );
+
+  return Buffer.from(response.data as ArrayBuffer);
+}
+
+/**
+ * Download an uploaded file (PDF, DOCX, DOC, XLSX, XLS) as binary
  */
 export async function downloadFile(tokens: GoogleTokens, fileId: string): Promise<Buffer> {
   const auth = getOAuthClient(tokens);
