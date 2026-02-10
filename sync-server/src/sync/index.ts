@@ -9,6 +9,7 @@ import {
   markSyncFailed,
   setV2Processing,
   updateV2Progress,
+  updateV2Heartbeat,
   createFileJobs,
   markFileProcessing,
   markFileCompleted,
@@ -445,6 +446,11 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     return { added: 0, updated: 0, deleted: 0, alreadySyncing: true };
   }
 
+  // Keep V2 heartbeat alive for the entire sync duration (covers discovery + processing)
+  const heartbeatInterval = setInterval(() => {
+    updateV2Heartbeat(user.userId).catch(() => {});
+  }, 30_000);
+
   try {
     const refreshedTokens = await refreshTokensIfNeeded(user.tokens);
     if (!refreshedTokens) {
@@ -596,6 +602,8 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     console.error(`  Sync failed with error: ${error.message}`);
     await markSyncFailed(user.userId, error.message);
     throw error;
+  } finally {
+    clearInterval(heartbeatInterval);
   }
 }
 

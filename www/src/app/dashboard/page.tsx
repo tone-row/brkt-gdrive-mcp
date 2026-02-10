@@ -75,6 +75,7 @@ export default function Dashboard() {
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
   const [keyCopied, setKeyCopied] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   // URL copy state
   const [urlCopied, setUrlCopied] = useState(false);
@@ -204,6 +205,22 @@ export default function Dashboard() {
     } catch (error: any) {
       setSyncResult(`Sync failed: ${error.message}`);
       setSyncing(false);
+    }
+  };
+
+  const handleCancelSync = async () => {
+    setCancelling(true);
+    try {
+      const res = await fetch("/api/me/sync/cancel", { method: "POST" });
+      if (res.ok) {
+        setSyncing(false);
+        setSyncResult("Sync cancelled");
+        fetchStatus();
+      }
+    } catch (error: any) {
+      console.error("Failed to cancel sync:", error);
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -555,13 +572,24 @@ export default function Dashboard() {
               </div>
             )}
 
-            <button
-              onClick={handleSync}
-              disabled={syncing || status.syncStatus?.status === "syncing"}
-              className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
-            >
-              {syncing || status.syncStatus?.status === "syncing" ? "Syncing..." : "Sync Now"}
-            </button>
+            <div className="flex gap-3">
+              <button
+                onClick={handleSync}
+                disabled={syncing || status.syncStatus?.status === "syncing"}
+                className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
+              >
+                {syncing || status.syncStatus?.status === "syncing" ? "Syncing..." : "Sync Now"}
+              </button>
+              {(syncing || status.syncStatus?.status === "syncing") && (
+                <button
+                  onClick={handleCancelSync}
+                  disabled={cancelling}
+                  className="px-5 py-2.5 text-red-600 border border-red-300 rounded-lg font-medium hover:bg-red-50 disabled:opacity-50"
+                >
+                  {cancelling ? "Cancelling..." : "Cancel Sync"}
+                </button>
+              )}
+            </div>
             {syncResult && (
               <p className={`mt-3 text-sm ${syncResult.includes("failed") ? "text-red-600" : "text-green-600"}`}>
                 {syncResult}

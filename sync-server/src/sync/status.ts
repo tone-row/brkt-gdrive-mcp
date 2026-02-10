@@ -104,6 +104,20 @@ export async function updateV2Progress(
 }
 
 /**
+ * Update only the V2 heartbeat timestamp (keeps sync alive during long phases)
+ */
+export async function updateV2Heartbeat(userId: string): Promise<void> {
+  try {
+    await db.execute({
+      sql: `UPDATE user_sync_state SET worker_heartbeat_at = datetime('now') WHERE user_id = ?`,
+      args: [userId],
+    });
+  } catch (e) {
+    // V2 table might not exist, ignore
+  }
+}
+
+/**
  * Mark V2 sync as completed
  */
 async function completeV2SyncState(
@@ -256,8 +270,8 @@ export async function markFileSkipped(userId: string, googleFileId: string, reas
 
 // If a sync has been running longer than this, consider it stale
 // Note: With min_machines_running = 1 in fly.toml, the machine stays alive during syncs.
-// 10 minutes allows enough time for large document syncs.
-const SYNC_TIMEOUT_MINUTES = 10;
+// 30 minutes allows enough time for first syncs with many files.
+const SYNC_TIMEOUT_MINUTES = 30;
 
 /**
  * Mark a sync as started. Returns false if a sync is already in progress.

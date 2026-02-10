@@ -52,14 +52,13 @@ export async function getSyncStatus(userId: string): Promise<SyncStatus | null> 
     const minutesElapsed = (now.getTime() - startedAtDate.getTime()) / (1000 * 60);
 
     if (minutesElapsed >= SYNC_TIMEOUT_MINUTES) {
-      console.log(`Auto-resetting stale sync for user ${userId} (started ${minutesElapsed.toFixed(1)} min ago)`);
-      await markSyncFailed(userId, "Sync timed out (server may have stopped)");
-      // Return the updated status
+      console.log(`Stale sync detected for user ${userId} (started ${minutesElapsed.toFixed(1)} min ago)`);
+      // Report as failed but don't write to DB — the sync server may still be running
       return {
         userId: row.user_id as string,
         status: "failed",
         startedAt,
-        completedAt: new Date().toISOString(),
+        completedAt: row.completed_at as string | null,
         lastResult: row.last_result ? JSON.parse(row.last_result as string) : null,
         error: "Sync timed out (server may have stopped)",
       };
@@ -81,7 +80,7 @@ export async function getSyncStatus(userId: string): Promise<SyncStatus | null> 
  * If a sync has been running for more than SYNC_TIMEOUT_MINUTES, it's considered stale.
  */
 export async function markSyncStarted(userId: string): Promise<boolean> {
-  // Check if already syncing - getSyncStatus will auto-reset stale syncs
+  // Check if already syncing - getSyncStatus reports stale syncs as "failed"
   const existing = await getSyncStatus(userId);
 
   // If still syncing after getSyncStatus check, it's a fresh sync in progress

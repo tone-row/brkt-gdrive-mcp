@@ -53,6 +53,10 @@ export async function writeDocumentToV2(
   chunks: ChunkData[]
 ): Promise<void> {
   try {
+    // TODO: This SELECT-then-INSERT can race if two users sync the same shared file
+    // simultaneously. The user_document_access UPSERT is safe, but document creation
+    // could produce duplicates or errors. Consider adding a UNIQUE(google_doc_id)
+    // constraint with ON CONFLICT handling.
     // Check if document already exists in documents_v2
     const existingDoc = await db.execute({
       sql: `SELECT id, google_modified_time FROM documents_v2 WHERE google_doc_id = ?`,
@@ -187,6 +191,9 @@ export async function removeUserAccessFromV2(
 
     console.log(`    [V2] Removed user access to document`);
 
+    // TODO: When all users lose access to a shared file, the documents_v2 row
+    // persists as an orphan. Add a periodic cleanup job that deletes documents_v2
+    // rows with zero user_document_access entries.
     // Note: We don't delete the document itself even if no users have access,
     // because another user might add it later. Cleanup of orphaned documents
     // would be a separate maintenance task.
