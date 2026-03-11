@@ -359,7 +359,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-100">
       <header className="flex justify-between items-center px-8 py-4 bg-white border-b border-gray-200">
-        <h1 className="text-xl font-bold text-gray-900">Google Drive Search</h1>
+        <h1 className="text-xl font-bold text-gray-900">Loft</h1>
         <div className="flex items-center gap-4">
           <span className="text-sm text-gray-600">{session.user?.email}</span>
           <button
@@ -647,7 +647,7 @@ export default function Dashboard() {
         <section className="bg-white p-6 rounded-xl shadow-sm">
           <h2 className="text-xl font-semibold mb-2">Connect to Claude</h2>
           <p className="text-gray-600 text-sm mb-4">
-            Generate an API key to connect your Google Drive search to Claude Desktop, Claude Mobile, Cursor, or other AI tools.
+            Generate an API key to connect Loft to Claude Desktop, Claude Mobile, Cursor, or other AI tools.
           </p>
 
           <div className="flex gap-2 mb-4">

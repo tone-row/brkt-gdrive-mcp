@@ -42,7 +42,7 @@ export default function Signup() {
           Create Account
         </h1>
         <p className="text-gray-500 text-center mb-6">
-          Get started with Google Drive Search
+          Get started with Loft
         </p>
 
         {error && (

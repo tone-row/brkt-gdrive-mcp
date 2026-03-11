@@ -209,7 +209,7 @@ export async function POST(request: NextRequest) {
               tools: {},
             },
             serverInfo: {
-              name: "brkt-gdrive",
+              name: "loft",
               version: "1.0.0",
             },
           })

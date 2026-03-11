@@ -147,7 +147,7 @@ function OAuthAuthorizeContent() {
       <div className="bg-white p-8 rounded-xl shadow-lg max-w-md w-full">
         <h1 className="text-2xl font-bold text-gray-900 mb-2">Authorize Application</h1>
         <p className="text-gray-600 mb-6">
-          <strong>{clientInfo.name}</strong> wants to access your Google Drive Search account.
+          <strong>{clientInfo.name}</strong> wants to access your Loft account.
         </p>
 
         <div className="bg-gray-50 rounded-lg p-4 mb-6">

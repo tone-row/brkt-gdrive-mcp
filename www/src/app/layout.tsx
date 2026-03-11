@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Google Drive Search",
-  description: "Semantic search over your Google Drive documents",
+  title: "Loft",
+  description: "Semantic search for your Google Drive, built for AI tools",
 };
 
 export default function RootLayout({
