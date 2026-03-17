@@ -328,6 +328,32 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// Handle GET requests (SSE transport / initial auth check)
+export async function GET(request: NextRequest) {
+  const userId = await getAuthenticatedUserId(request);
+  if (!userId) {
+    const host = request.headers.get("host") || "localhost";
+    const proto = request.headers.get("x-forwarded-proto") || "https";
+    const resourceMetadataUrl = `${proto}://${host}/.well-known/oauth-protected-resource/mcp`;
+    return NextResponse.json(
+      jsonRpcError(null, -32000, "Unauthorized"),
+      {
+        status: 401,
+        headers: {
+          "WWW-Authenticate": `Bearer resource_metadata="${resourceMetadataUrl}"`,
+          "Access-Control-Expose-Headers": "WWW-Authenticate",
+        },
+      }
+    );
+  }
+
+  // Authenticated GET — return method not allowed (POST required for JSON-RPC)
+  return NextResponse.json(
+    jsonRpcError(null, -32600, "Use POST for JSON-RPC requests"),
+    { status: 405 }
+  );
+}
+
 // Handle preflight requests for CORS
 export async function OPTIONS() {
   return new NextResponse(null, {

@@ -48,64 +48,69 @@ export async function GET(request: NextRequest) {
     return errorPage("Invalid Request", "Missing client_id parameter.");
   }
 
-  // Look up in dynamic registered clients first, then legacy oauth_clients
-  const registeredClient = await getRegisteredClient(clientId);
-  const legacyClient = registeredClient ? null : await getOAuthClientByClientId(clientId);
+  try {
+    // Look up in dynamic registered clients first, then legacy oauth_clients
+    const registeredClient = await getRegisteredClient(clientId);
+    const legacyClient = registeredClient ? null : await getOAuthClientByClientId(clientId);
 
-  if (!registeredClient && !legacyClient) {
-    return errorPage("Unknown Client", "The client_id is not recognized.");
-  }
-
-  // --- Step 2: Validate redirect_uri (render error page, never redirect) ---
-  if (!redirectUri) {
-    return errorPage("Invalid Request", "Missing redirect_uri parameter.");
-  }
-
-  if (registeredClient) {
-    if (!registeredClient.redirectUris.includes(redirectUri)) {
-      return errorPage("Invalid Redirect", "The redirect_uri does not match the registered client.");
+    if (!registeredClient && !legacyClient) {
+      return errorPage("Unknown Client", "The client_id is not recognized.");
     }
+
+    // --- Step 2: Validate redirect_uri (render error page, never redirect) ---
+    if (!redirectUri) {
+      return errorPage("Invalid Request", "Missing redirect_uri parameter.");
+    }
+
+    if (registeredClient) {
+      if (!registeredClient.redirectUris.includes(redirectUri)) {
+        return errorPage("Invalid Redirect", "The redirect_uri does not match the registered client.");
+      }
+    }
+    // Legacy clients don't have registered redirect URIs — allow any
+
+    // --- Step 3: Validate remaining params (redirect errors to redirect_uri) ---
+    if (responseType !== "code") {
+      return errorRedirect(redirectUri, "unsupported_response_type", "Only response_type=code is supported.", state);
+    }
+
+    if (!state) {
+      return errorRedirect(redirectUri, "invalid_request", "state parameter is required.", state);
+    }
+
+    if (codeChallengeMethod && codeChallengeMethod !== "S256") {
+      return errorRedirect(redirectUri, "invalid_request", "Only S256 code_challenge_method is supported.", state);
+    }
+
+    // --- Step 4: Check session ---
+    const user = await getCurrentUser(request);
+
+    if (!user) {
+      // No session — redirect to login with returnUrl pointing back here
+      const authorizeUrl = url.toString();
+      const loginUrl = new URL("/login", url.origin);
+      loginUrl.searchParams.set("returnUrl", authorizeUrl);
+      return NextResponse.redirect(loginUrl.toString());
+    }
+
+    // --- Step 5: Auto-approve — create auth code and redirect ---
+    const code = await createAuthorizationCode(
+      clientId,
+      user.id,
+      redirectUri,
+      scope,
+      codeChallenge,
+      codeChallengeMethod
+    );
+
+    const callbackUrl = new URL(redirectUri);
+    callbackUrl.searchParams.set("code", code);
+    callbackUrl.searchParams.set("state", state);
+    return NextResponse.redirect(callbackUrl.toString());
+  } catch (error) {
+    console.error("Authorize GET error:", error);
+    return errorPage("Server Error", "An unexpected error occurred. Please try again.");
   }
-  // Legacy clients don't have registered redirect URIs — allow any
-
-  // --- Step 3: Validate remaining params (redirect errors to redirect_uri) ---
-  if (responseType !== "code") {
-    return errorRedirect(redirectUri, "unsupported_response_type", "Only response_type=code is supported.", state);
-  }
-
-  if (!state) {
-    return errorRedirect(redirectUri, "invalid_request", "state parameter is required.", state);
-  }
-
-  if (codeChallengeMethod && codeChallengeMethod !== "S256") {
-    return errorRedirect(redirectUri, "invalid_request", "Only S256 code_challenge_method is supported.", state);
-  }
-
-  // --- Step 4: Check session ---
-  const user = await getCurrentUser(request);
-
-  if (!user) {
-    // No session — redirect to login with returnUrl pointing back here
-    const authorizeUrl = url.toString();
-    const loginUrl = new URL("/login", url.origin);
-    loginUrl.searchParams.set("returnUrl", authorizeUrl);
-    return NextResponse.redirect(loginUrl.toString());
-  }
-
-  // --- Step 5: Auto-approve — create auth code and redirect ---
-  const code = await createAuthorizationCode(
-    clientId,
-    user.id,
-    redirectUri,
-    scope,
-    codeChallenge,
-    codeChallengeMethod
-  );
-
-  const callbackUrl = new URL(redirectUri);
-  callbackUrl.searchParams.set("code", code);
-  callbackUrl.searchParams.set("state", state);
-  return NextResponse.redirect(callbackUrl.toString());
 }
 
 /**
