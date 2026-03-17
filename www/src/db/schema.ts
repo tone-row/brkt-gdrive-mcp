@@ -190,7 +190,8 @@ export async function runMigrations() {
   `);
 
   // Authorization codes (short-lived, one-time use)
-  // client_id can reference either oauth_clients or oauth_registered_clients, so no FK constraint
+  // No FK constraints — client_id can reference oauth_clients or oauth_registered_clients,
+  // and Turso enforces PRAGMA foreign_keys=ON which blocks inserts even with valid user_ids
   await db.execute(`
     CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
       code_hash TEXT PRIMARY KEY,
@@ -201,13 +202,11 @@ export async function runMigrations() {
       code_challenge TEXT,
       code_challenge_method TEXT,
       expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
 
   // Access tokens (short-lived) and refresh tokens (long-lived)
-  // client_id can reference either oauth_clients or oauth_registered_clients, so no FK constraint
   await db.execute(`
     CREATE TABLE IF NOT EXISTS oauth_access_tokens (
       access_token_hash TEXT PRIMARY KEY,
@@ -216,54 +215,9 @@ export async function runMigrations() {
       user_id TEXT NOT NULL,
       scope TEXT NOT NULL,
       expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
-
-  // Migration: Recreate oauth tables without FK on client_id (supports dynamic clients)
-  // Auth codes are ephemeral (10 min), tokens are migrated
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS oauth_authorization_codes_v2 (
-      code_hash TEXT PRIMARY KEY,
-      client_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      redirect_uri TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      code_challenge TEXT,
-      code_challenge_method TEXT,
-      expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS oauth_access_tokens_v2 (
-      access_token_hash TEXT PRIMARY KEY,
-      refresh_token_hash TEXT UNIQUE NOT NULL,
-      client_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      scope TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    )
-  `);
-  // Copy existing tokens, drop old tables, rename new ones
-  const hasOldTokens = await db.execute(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name='oauth_access_tokens' AND sql LIKE '%REFERENCES oauth_clients%'`
-  );
-  if (hasOldTokens.rows.length > 0) {
-    await db.execute(`INSERT OR IGNORE INTO oauth_access_tokens_v2 SELECT * FROM oauth_access_tokens`);
-    await db.execute(`DROP TABLE oauth_access_tokens`);
-    await db.execute(`ALTER TABLE oauth_access_tokens_v2 RENAME TO oauth_access_tokens`);
-    await db.execute(`DROP TABLE IF EXISTS oauth_authorization_codes`);
-    await db.execute(`ALTER TABLE oauth_authorization_codes_v2 RENAME TO oauth_authorization_codes`);
-  } else {
-    // Already migrated, clean up v2 tables if they exist as empty shells
-    await db.execute(`DROP TABLE IF EXISTS oauth_access_tokens_v2`);
-    await db.execute(`DROP TABLE IF EXISTS oauth_authorization_codes_v2`);
-  }
 
   // Create index on client_id for oauth_clients
   await db.execute(`

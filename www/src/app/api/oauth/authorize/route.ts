@@ -83,7 +83,13 @@ export async function GET(request: NextRequest) {
     }
 
     // --- Step 4: Check session ---
-    const user = await getCurrentUser(request);
+    let user: { id: string; email: string } | null;
+    try {
+      user = await getCurrentUser(request);
+    } catch (sessionError) {
+      console.error("Authorize GET: getCurrentUser failed:", sessionError);
+      throw sessionError;
+    }
 
     if (!user) {
       // No session — redirect to login with returnUrl pointing back here
@@ -94,19 +100,25 @@ export async function GET(request: NextRequest) {
     }
 
     // --- Step 5: Auto-approve — create auth code and redirect ---
-    const code = await createAuthorizationCode(
-      clientId,
-      user.id,
-      redirectUri,
-      scope,
-      codeChallenge,
-      codeChallengeMethod
-    );
+    console.log("Authorize GET: creating code for user", user.id, "client", clientId);
+    try {
+      const code = await createAuthorizationCode(
+        clientId,
+        user.id,
+        redirectUri,
+        scope,
+        codeChallenge,
+        codeChallengeMethod
+      );
 
-    const callbackUrl = new URL(redirectUri);
-    callbackUrl.searchParams.set("code", code);
-    callbackUrl.searchParams.set("state", state);
-    return NextResponse.redirect(callbackUrl.toString());
+      const callbackUrl = new URL(redirectUri);
+      callbackUrl.searchParams.set("code", code);
+      callbackUrl.searchParams.set("state", state);
+      return NextResponse.redirect(callbackUrl.toString());
+    } catch (codeError) {
+      console.error("Authorize GET: createAuthorizationCode failed for user", user.id, "client", clientId, "error:", codeError);
+      throw codeError;
+    }
   } catch (error) {
     console.error("Authorize GET error:", error);
     return errorPage("Server Error", "An unexpected error occurred. Please try again.");
