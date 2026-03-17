@@ -183,9 +183,18 @@ export async function POST(request: NextRequest) {
     // Authenticate the request
     const userId = await getAuthenticatedUserId(request);
     if (!userId) {
+      const host = request.headers.get("host") || "localhost";
+      const proto = request.headers.get("x-forwarded-proto") || "https";
+      const resourceMetadataUrl = `${proto}://${host}/.well-known/oauth-protected-resource/mcp`;
       return NextResponse.json(
         jsonRpcError(null, -32000, "Unauthorized"),
-        { status: 401 }
+        {
+          status: 401,
+          headers: {
+            "WWW-Authenticate": `Bearer resource_metadata="${resourceMetadataUrl}"`,
+            "Access-Control-Expose-Headers": "WWW-Authenticate",
+          },
+        }
       );
     }
 
@@ -327,6 +336,7 @@ export async function OPTIONS() {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Expose-Headers": "WWW-Authenticate",
     },
   });
 }

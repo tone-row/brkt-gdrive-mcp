@@ -1,9 +1,115 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth-helper";
 import { getOAuthClientByClientId, createAuthorizationCode } from "@/lib/oauth-clients";
+import { getRegisteredClient } from "@/lib/oauth-dynamic";
 
 /**
- * Create an authorization code
+ * Build an error redirect URL for OAuth errors that should go back to the client
+ */
+function errorRedirect(redirectUri: string, error: string, description: string, state?: string) {
+  const url = new URL(redirectUri);
+  url.searchParams.set("error", error);
+  url.searchParams.set("error_description", description);
+  if (state) url.searchParams.set("state", state);
+  return NextResponse.redirect(url.toString());
+}
+
+/**
+ * Return an HTML error page for errors that must NOT redirect (invalid client_id, invalid redirect_uri)
+ */
+function errorPage(title: string, message: string) {
+  return new NextResponse(
+    `<!DOCTYPE html><html><head><title>${title}</title></head><body style="font-family:system-ui;max-width:500px;margin:80px auto;text-align:center"><h1>${title}</h1><p>${message}</p></body></html>`,
+    { status: 400, headers: { "Content-Type": "text/html" } }
+  );
+}
+
+/**
+ * OAuth 2.0 Authorize — GET handler (MCP spec browser redirect flow)
+ *
+ * Flow:
+ * 1. Validate client_id + redirect_uri (errors shown as page, never redirected)
+ * 2. Validate remaining params (errors redirected to redirect_uri)
+ * 3. Check session — no session → redirect to /login?returnUrl=<this URL>
+ * 4. Has session → auto-approve, create auth code, redirect to redirect_uri
+ */
+export async function GET(request: NextRequest) {
+  const url = new URL(request.url);
+  const clientId = url.searchParams.get("client_id");
+  const redirectUri = url.searchParams.get("redirect_uri");
+  const responseType = url.searchParams.get("response_type");
+  const state = url.searchParams.get("state") || undefined;
+  const codeChallenge = url.searchParams.get("code_challenge") || undefined;
+  const codeChallengeMethod = url.searchParams.get("code_challenge_method") || undefined;
+  const scope = url.searchParams.get("scope") || "mcp:tools";
+
+  // --- Step 1: Validate client_id (render error page, never redirect) ---
+  if (!clientId) {
+    return errorPage("Invalid Request", "Missing client_id parameter.");
+  }
+
+  // Look up in dynamic registered clients first, then legacy oauth_clients
+  const registeredClient = await getRegisteredClient(clientId);
+  const legacyClient = registeredClient ? null : await getOAuthClientByClientId(clientId);
+
+  if (!registeredClient && !legacyClient) {
+    return errorPage("Unknown Client", "The client_id is not recognized.");
+  }
+
+  // --- Step 2: Validate redirect_uri (render error page, never redirect) ---
+  if (!redirectUri) {
+    return errorPage("Invalid Request", "Missing redirect_uri parameter.");
+  }
+
+  if (registeredClient) {
+    if (!registeredClient.redirectUris.includes(redirectUri)) {
+      return errorPage("Invalid Redirect", "The redirect_uri does not match the registered client.");
+    }
+  }
+  // Legacy clients don't have registered redirect URIs — allow any
+
+  // --- Step 3: Validate remaining params (redirect errors to redirect_uri) ---
+  if (responseType !== "code") {
+    return errorRedirect(redirectUri, "unsupported_response_type", "Only response_type=code is supported.", state);
+  }
+
+  if (!state) {
+    return errorRedirect(redirectUri, "invalid_request", "state parameter is required.", state);
+  }
+
+  if (codeChallengeMethod && codeChallengeMethod !== "S256") {
+    return errorRedirect(redirectUri, "invalid_request", "Only S256 code_challenge_method is supported.", state);
+  }
+
+  // --- Step 4: Check session ---
+  const user = await getCurrentUser(request);
+
+  if (!user) {
+    // No session — redirect to login with returnUrl pointing back here
+    const authorizeUrl = url.toString();
+    const loginUrl = new URL("/login", url.origin);
+    loginUrl.searchParams.set("returnUrl", authorizeUrl);
+    return NextResponse.redirect(loginUrl.toString());
+  }
+
+  // --- Step 5: Auto-approve — create auth code and redirect ---
+  const code = await createAuthorizationCode(
+    clientId,
+    user.id,
+    redirectUri,
+    scope,
+    codeChallenge,
+    codeChallengeMethod
+  );
+
+  const callbackUrl = new URL(redirectUri);
+  callbackUrl.searchParams.set("code", code);
+  callbackUrl.searchParams.set("state", state);
+  return NextResponse.redirect(callbackUrl.toString());
+}
+
+/**
+ * Create an authorization code (legacy POST handler)
  * Called after user consents on the authorize page
  */
 export async function POST(request: NextRequest) {
@@ -37,8 +143,6 @@ export async function POST(request: NextRequest) {
 
     // Validate that the user owns this client
     if (client.userId !== user.id) {
-      // For MCP OAuth, the user authorizing should be the owner of the client credentials
-      // This is because the client credentials are tied to the user's account
       return NextResponse.json(
         { error: "Client does not belong to the authenticated user" },
         { status: 403 }

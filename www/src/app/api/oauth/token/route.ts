@@ -5,10 +5,12 @@ import {
   createTokens,
   refreshTokens,
 } from "@/lib/oauth-clients";
+import { getRegisteredClient } from "@/lib/oauth-dynamic";
 
 /**
  * OAuth 2.0 Token Endpoint
  * Supports: authorization_code and refresh_token grant types
+ * Supports both confidential clients (with secret) and public clients (no secret, PKCE required)
  */
 export async function POST(request: NextRequest) {
   try {
@@ -46,20 +48,36 @@ export async function POST(request: NextRequest) {
       if (!finalClientSecret) finalClientSecret = headerClientSecret;
     }
 
-    if (!finalClientId || !finalClientSecret) {
+    if (!finalClientId) {
       return NextResponse.json(
-        { error: "invalid_client", error_description: "Client credentials required" },
+        { error: "invalid_client", error_description: "client_id is required" },
         { status: 401 }
       );
     }
 
-    // Validate client credentials
-    const client = await validateClientCredentials(finalClientId, finalClientSecret);
-    if (!client) {
-      return NextResponse.json(
-        { error: "invalid_client", error_description: "Invalid client credentials" },
-        { status: 401 }
-      );
+    // Try public client path: client_id present but no client_secret
+    let isPublicClient = false;
+    if (!finalClientSecret) {
+      const registeredClient = await getRegisteredClient(finalClientId);
+      if (registeredClient && registeredClient.tokenEndpointAuthMethod === "none") {
+        isPublicClient = true;
+      } else {
+        return NextResponse.json(
+          { error: "invalid_client", error_description: "Client credentials required" },
+          { status: 401 }
+        );
+      }
+    }
+
+    // For confidential clients, validate credentials
+    if (!isPublicClient) {
+      const client = await validateClientCredentials(finalClientId, finalClientSecret!);
+      if (!client) {
+        return NextResponse.json(
+          { error: "invalid_client", error_description: "Invalid client credentials" },
+          { status: 401 }
+        );
+      }
     }
 
     // Handle grant types

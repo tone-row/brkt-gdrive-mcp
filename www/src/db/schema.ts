@@ -226,6 +226,20 @@ export async function runMigrations() {
     CREATE INDEX IF NOT EXISTS oauth_clients_user_id_idx ON oauth_clients(user_id)
   `);
 
+  // Dynamically registered OAuth clients (MCP spec - public clients)
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS oauth_registered_clients (
+      client_id TEXT PRIMARY KEY,
+      client_secret_hash TEXT,
+      client_name TEXT NOT NULL,
+      redirect_uris TEXT NOT NULL DEFAULT '[]',
+      grant_types TEXT NOT NULL DEFAULT '["authorization_code"]',
+      response_types TEXT NOT NULL DEFAULT '["code"]',
+      token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
   // ========================================
   // V2 Sync Architecture Tables
   // ========================================
