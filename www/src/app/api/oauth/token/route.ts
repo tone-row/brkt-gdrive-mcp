@@ -62,12 +62,19 @@ export async function POST(request: NextRequest) {
     let isPublicClient = false;
     if (!finalClientSecret) {
       const registeredClient = await getRegisteredClient(finalClientId);
-      console.log("Token endpoint: public client lookup result=", registeredClient ? registeredClient.tokenEndpointAuthMethod : "NOT FOUND");
-      if (registeredClient && registeredClient.tokenEndpointAuthMethod === "none") {
+      // Treat as public client if registered and has no secret stored
+      // (regardless of token_endpoint_auth_method — clients like Claude
+      // may register with "client_secret_post" but act as public clients)
+      if (registeredClient && !registeredClient.clientSecretHash) {
         isPublicClient = true;
+      } else if (registeredClient && registeredClient.clientSecretHash) {
+        return NextResponse.json(
+          { error: "invalid_client", error_description: "Client secret required" },
+          { status: 401 }
+        );
       } else {
         return NextResponse.json(
-          { error: "invalid_client", error_description: "Client credentials required" },
+          { error: "invalid_client", error_description: "Unknown client" },
           { status: 401 }
         );
       }
