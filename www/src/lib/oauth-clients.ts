@@ -196,6 +196,68 @@ export async function getOAuthClientByClientId(clientId: string): Promise<OAuthC
 /**
  * Create an authorization code
  */
+let oauthTablesFixed = false;
+
+/**
+ * Ensure oauth tables have no FK constraints.
+ * Turso edge replicas may serve stale schema — this self-heals by
+ * recreating the tables without FKs on first use.
+ */
+async function ensureOAuthTablesNoFK() {
+  if (oauthTablesFixed) return;
+
+  const schemaResult = await db.execute(
+    "SELECT sql FROM sqlite_master WHERE name='oauth_authorization_codes'"
+  );
+  const sql = schemaResult.rows[0]?.sql as string | undefined;
+
+  if (sql && sql.includes("REFERENCES")) {
+    console.log("Fixing oauth tables: removing FK constraints");
+
+    // Recreate oauth_authorization_codes without FKs (codes are ephemeral)
+    await db.execute("DROP TABLE IF EXISTS oauth_authorization_codes");
+    await db.execute(`
+      CREATE TABLE oauth_authorization_codes (
+        code_hash TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        code_challenge TEXT,
+        code_challenge_method TEXT,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
+    // Recreate oauth_access_tokens without FKs (preserve data)
+    const tokenSchema = await db.execute(
+      "SELECT sql FROM sqlite_master WHERE name='oauth_access_tokens'"
+    );
+    const tokenSql = tokenSchema.rows[0]?.sql as string | undefined;
+    if (tokenSql && tokenSql.includes("REFERENCES")) {
+      await db.execute(`
+        CREATE TABLE oauth_access_tokens_fixed (
+          access_token_hash TEXT PRIMARY KEY,
+          refresh_token_hash TEXT UNIQUE NOT NULL,
+          client_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+      await db.execute("INSERT INTO oauth_access_tokens_fixed SELECT * FROM oauth_access_tokens");
+      await db.execute("DROP TABLE oauth_access_tokens");
+      await db.execute("ALTER TABLE oauth_access_tokens_fixed RENAME TO oauth_access_tokens");
+    }
+
+    console.log("OAuth tables fixed");
+  }
+
+  oauthTablesFixed = true;
+}
+
 export async function createAuthorizationCode(
   clientId: string,
   userId: string,
@@ -204,15 +266,11 @@ export async function createAuthorizationCode(
   codeChallenge?: string,
   codeChallengeMethod?: string
 ): Promise<string> {
+  await ensureOAuthTablesNoFK();
+
   const code = generateSecret(32);
   const codeHash = await hashString(code);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
-
-  // DEBUG: Log table schema and DB URL to diagnose FK issue
-  const schemaResult = await db.execute("SELECT sql FROM sqlite_master WHERE name='oauth_authorization_codes'");
-  console.log("DEBUG createAuthorizationCode: TURSO_URL=", process.env.TURSO_URL?.slice(0, 30) + "...");
-  console.log("DEBUG createAuthorizationCode: table schema=", schemaResult.rows[0]?.sql);
-  console.log("DEBUG createAuthorizationCode: userId=", userId, "clientId=", clientId);
 
   await db.execute({
     sql: `INSERT INTO oauth_authorization_codes
@@ -297,6 +355,8 @@ export async function createTokens(
   userId: string,
   scope: string
 ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  await ensureOAuthTablesNoFK();
+
   const accessToken = `at_${generateSecret(32)}`;
   const refreshToken = `rt_${generateSecret(32)}`;
   const accessTokenHash = await hashString(accessToken);
