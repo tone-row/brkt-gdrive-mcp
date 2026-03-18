@@ -208,6 +208,12 @@ export async function createAuthorizationCode(
   const codeHash = await hashString(code);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes
 
+  // DEBUG: Log table schema and DB URL to diagnose FK issue
+  const schemaResult = await db.execute("SELECT sql FROM sqlite_master WHERE name='oauth_authorization_codes'");
+  console.log("DEBUG createAuthorizationCode: TURSO_URL=", process.env.TURSO_URL?.slice(0, 30) + "...");
+  console.log("DEBUG createAuthorizationCode: table schema=", schemaResult.rows[0]?.sql);
+  console.log("DEBUG createAuthorizationCode: userId=", userId, "clientId=", clientId);
+
   await db.execute({
     sql: `INSERT INTO oauth_authorization_codes
           (code_hash, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, created_at)
