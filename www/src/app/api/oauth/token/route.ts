@@ -48,7 +48,10 @@ export async function POST(request: NextRequest) {
       if (!finalClientSecret) finalClientSecret = headerClientSecret;
     }
 
+    console.log("Token endpoint: grant_type=", grant_type, "client_id=", finalClientId, "has_secret=", !!finalClientSecret, "has_code=", !!code, "content-type=", contentType);
+
     if (!finalClientId) {
+      console.log("Token endpoint: no client_id found in body or auth header");
       return NextResponse.json(
         { error: "invalid_client", error_description: "client_id is required" },
         { status: 401 }
@@ -59,6 +62,7 @@ export async function POST(request: NextRequest) {
     let isPublicClient = false;
     if (!finalClientSecret) {
       const registeredClient = await getRegisteredClient(finalClientId);
+      console.log("Token endpoint: public client lookup result=", registeredClient ? registeredClient.tokenEndpointAuthMethod : "NOT FOUND");
       if (registeredClient && registeredClient.tokenEndpointAuthMethod === "none") {
         isPublicClient = true;
       } else {
