@@ -43,3 +43,4 @@ local.db
 .vercel
 dist/
 .env*.local
+backups/
