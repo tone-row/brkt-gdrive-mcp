@@ -12,6 +12,7 @@ const client = createClient({
 const db = drizzle(client, { schema: authSchema });
 
 export const auth = betterAuth({
+  baseURL: process.env.BETTER_AUTH_URL || process.env.NEXT_PUBLIC_APP_URL,
   database: drizzleAdapter(db, {
     provider: "sqlite",
     schema: authSchema,

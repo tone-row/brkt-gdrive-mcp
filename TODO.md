@@ -1,0 +1,2 @@
+- confirm that same team files are indexed more than once
+- learn how to thread identity through singular team-level mcp installation in claude
