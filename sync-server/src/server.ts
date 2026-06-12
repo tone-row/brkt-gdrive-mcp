@@ -10,6 +10,50 @@ if (!CRON_SECRET) {
 
 console.log(`Starting sync server on port ${PORT}...`);
 
+// ============================================
+// Built-in scheduler
+// ============================================
+// Scheduling lives here (the machine is always on: min_machines_running = 1)
+// instead of GitHub Actions, whose cron is silently disabled after 60 days
+// without repo activity — which is exactly what stopped all indexing between
+// May 17 and June 12, 2026. The GH workflow remains as a manual fallback.
+//
+// The first run fires shortly after boot, so a machine restart (deploy, OOM)
+// mid-sync self-heals: interrupted files resume on that catch-up run.
+const SYNC_INTERVAL_HOURS = Number(process.env.SYNC_INTERVAL_HOURS ?? "8");
+const INITIAL_SYNC_DELAY_MS = 5 * 60 * 1000;
+
+let scheduledSyncRunning = false;
+
+async function runScheduledSync(): Promise<void> {
+  if (scheduledSyncRunning) {
+    console.log("[Scheduler] Previous scheduled sync still running, skipping this tick");
+    return;
+  }
+  scheduledSyncRunning = true;
+  const startTime = Date.now();
+  console.log(`[Scheduler] Starting scheduled sync at ${new Date().toISOString()}`);
+  try {
+    const result = await sync();
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[Scheduler] Scheduled sync completed in ${duration}s: +${result.totalAdded} added, ~${result.totalUpdated} updated, -${result.totalDeleted} deleted`);
+  } catch (error: any) {
+    console.error(`[Scheduler] Scheduled sync failed: ${error.message}`);
+  } finally {
+    scheduledSyncRunning = false;
+  }
+}
+
+if (SYNC_INTERVAL_HOURS > 0) {
+  console.log(`[Scheduler] Sync every ${SYNC_INTERVAL_HOURS}h; first run in ${INITIAL_SYNC_DELAY_MS / 60000} min`);
+  setTimeout(() => {
+    runScheduledSync();
+    setInterval(runScheduledSync, SYNC_INTERVAL_HOURS * 60 * 60 * 1000);
+  }, INITIAL_SYNC_DELAY_MS);
+} else {
+  console.log("[Scheduler] Disabled (SYNC_INTERVAL_HOURS=0)");
+}
+
 Bun.serve({
   port: Number(PORT),
 
