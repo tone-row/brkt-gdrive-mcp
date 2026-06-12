@@ -24,6 +24,12 @@ import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessF
 // Maximum file size for processing (10 MB)
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
+// Google-native files have no size metadata, so the cap above never applies
+// to them. Sheets are the dangerous case: the XLSX export is zipped XML that
+// the parser inflates ~50-100x in memory — a single large sheet OOM-killed
+// the 1GB worker. Cap the exported size instead.
+const MAX_SHEET_EXPORT_BYTES = 5 * 1024 * 1024;
+
 // Chunks per OpenAI embeddings request
 const EMBED_BATCH_SIZE = 20;
 // Chunk rows per Turso batch write. Kept small: every row triggers a DiskANN
@@ -75,6 +81,10 @@ async function extractText(tokens: GoogleTokens, file: DriveDocument): Promise<E
 
     case "application/vnd.google-apps.spreadsheet": {
       const xlsxBuffer = await exportSheetAsXlsx(tokens, file.id);
+      if (xlsxBuffer.length > MAX_SHEET_EXPORT_BYTES) {
+        const sizeMb = (xlsxBuffer.length / 1024 / 1024).toFixed(1);
+        return { success: false, skip: true, reason: `Spreadsheet export too large (${sizeMb} MB, max 5 MB)` };
+      }
       const sheetText = extractTextFromSpreadsheet(xlsxBuffer);
       if (!sheetText.trim()) {
         return { success: false, skip: true, reason: "Spreadsheet is empty" };
