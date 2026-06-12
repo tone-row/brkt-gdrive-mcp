@@ -30,6 +30,18 @@ const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 // the 1GB worker. Cap the exported size instead.
 const MAX_SHEET_EXPORT_BYTES = 5 * 1024 * 1024;
 
+// Cap on EXTRACTED text, format-agnostic. Text length is what actually drives
+// cost (chunks, embeddings, per-user DB amplification): 2 MB of text is
+// ~700 chunks per user copy. File-byte caps above are just the cheap first
+// gate; this is the real one.
+const MAX_EXTRACTED_TEXT_CHARS = 2 * 1024 * 1024;
+
+function oversizeReason(text: string): string | null {
+  if (text.length <= MAX_EXTRACTED_TEXT_CHARS) return null;
+  const mb = (text.length / 1024 / 1024).toFixed(1);
+  return `Document exceeds the ingestion size limit (${mb} MB of text, max 2 MB)`;
+}
+
 // Chunks per OpenAI embeddings request
 const EMBED_BATCH_SIZE = 20;
 // Chunk rows per Turso batch write. Kept small: every row triggers a DiskANN
@@ -399,6 +411,12 @@ async function indexDocument(
     return { indexed: false, skipped: true, skipReason: "Document is empty" };
   }
 
+  const oversize = oversizeReason(text);
+  if (oversize) {
+    console.log(`    Skipping: ${oversize}`);
+    return { indexed: false, skipped: true, skipReason: oversize };
+  }
+
   const docId = uuid();
 
   // Insert document with a placeholder timestamp - we'll update it AFTER all chunks succeed.
@@ -472,6 +490,20 @@ async function updateDocument(
       await removeUserAccessFromV2(userId, driveDoc.id);
     }
     return { updated: false, skipped: true, skipReason: "Document is empty" };
+  }
+
+  // Unlike other skips, an oversized doc keeps its existing index: deleting
+  // it would vanish a doc from search the day it grows past the cap. The
+  // stored timestamp stays stale, so we re-check on every sync and resume
+  // updating if the file shrinks back under the limit (e.g. gets split).
+  const oversize = oversizeReason(text);
+  if (oversize) {
+    console.log(`    Skipping (existing index kept): ${oversize}`);
+    return {
+      updated: false,
+      skipped: true,
+      skipReason: `${oversize} — new content is no longer indexed; the previously indexed version remains searchable`,
+    };
   }
 
   // Update document content but NOT the timestamp yet.

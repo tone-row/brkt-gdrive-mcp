@@ -35,11 +35,18 @@ interface FileSummary {
   skipped: number;
 }
 
+interface UnindexedFile {
+  fileName: string;
+  status: string;
+  reason: string | null;
+}
+
 interface UserStatus {
   googleConnected: boolean;
   needsReconnect: boolean;
   documentCount: number;
   chunkCount: number;
+  unindexedFiles?: UnindexedFile[];
   syncStatus: SyncStatusInfo | null;
 }
 
@@ -439,6 +446,29 @@ export default function Dashboard() {
                 <span className="text-xs text-gray-500">Chunks</span>
               </div>
             </div>
+
+            {/* Files the last sync couldn't fully index */}
+            {status.unindexedFiles && status.unindexedFiles.length > 0 && (
+              <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                <p className="text-amber-800 text-sm font-medium mb-2">
+                  {status.unindexedFiles.length === 1
+                    ? "1 file isn't fully indexed"
+                    : `${status.unindexedFiles.length} files aren't fully indexed`}
+                </p>
+                <ul className="space-y-1.5">
+                  {status.unindexedFiles.map((file) => (
+                    <li key={file.fileName} className="text-xs text-amber-800">
+                      <span className="font-medium">{file.fileName}</span>
+                      {file.reason && (
+                        <span className="block text-amber-700 pl-3">
+                          {file.reason}
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {/* Sync Status Info */}
             {status.syncStatus && (

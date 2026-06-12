@@ -99,6 +99,26 @@ export async function GET(request: NextRequest) {
     // User needs to reconnect if they have documents but no valid token
     const needsReconnect = !hasValidToken && documentCount > 0;
 
+    // Files the last sync couldn't (fully) index — skipped (e.g. over the
+    // ingestion size limit) or failed. Oversized files reappear here every
+    // sync, so this stays current without extra bookkeeping.
+    let unindexedFiles: Array<{ fileName: string; status: string; reason: string | null }> = [];
+    try {
+      const unindexedResult = await db.execute({
+        sql: `SELECT file_name, status, error FROM file_jobs
+              WHERE user_id = ? AND status IN ('skipped', 'failed')
+              ORDER BY status DESC, file_name ASC`,
+        args: [user.id],
+      });
+      unindexedFiles = unindexedResult.rows.map((row) => ({
+        fileName: row.file_name as string,
+        status: row.status as string,
+        reason: row.error as string | null,
+      }));
+    } catch {
+      // file_jobs table might not exist yet
+    }
+
     // Get sync status from V2 table if enabled, otherwise use V1
     if (USE_V2_SYNC_STATE) {
       const v2Status = await getV2SyncStatus(user.id);
@@ -118,6 +138,7 @@ export async function GET(request: NextRequest) {
         needsReconnect,
         documentCount,
         chunkCount,
+        unindexedFiles,
         syncStatus: v2Status ? {
           status: mappedStatus,
           startedAt: v2Status.startedAt,
@@ -147,6 +168,7 @@ export async function GET(request: NextRequest) {
       needsReconnect,
       documentCount,
       chunkCount,
+      unindexedFiles,
       syncStatus: syncStatus ? {
         status: syncStatus.status,
         startedAt: syncStatus.startedAt,
