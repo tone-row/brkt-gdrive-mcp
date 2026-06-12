@@ -456,8 +456,8 @@ export default function Dashboard() {
                     : `${status.unindexedFiles.length} files aren't fully indexed`}
                 </p>
                 <ul className="space-y-1.5">
-                  {status.unindexedFiles.map((file) => (
-                    <li key={file.fileName} className="text-xs text-amber-800">
+                  {status.unindexedFiles.map((file, idx) => (
+                    <li key={`${file.fileName}-${idx}`} className="text-xs text-amber-800">
                       <span className="font-medium">{file.fileName}</span>
                       {file.reason && (
                         <span className="block text-amber-700 pl-3">
