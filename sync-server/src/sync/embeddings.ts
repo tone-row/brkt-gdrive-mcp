@@ -2,6 +2,10 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  // Bound each request so a hung connection fails fast and retries, instead
+  // of stalling the sync for the SDK's default 10 minutes.
+  timeout: 60_000,
+  maxRetries: 3,
 });
 
 const EMBEDDING_MODEL = "text-embedding-3-small";

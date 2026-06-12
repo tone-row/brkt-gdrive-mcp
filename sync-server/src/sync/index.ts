@@ -1,8 +1,10 @@
-import { db } from "../db/client";
+import { db, withRetry } from "../db/client";
 import { listSupportedFiles, exportDocAsText, exportSheetAsXlsx, downloadFile, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
 import { extractTextFromPdf, extractTextFromDocx, extractTextFromDoc, extractTextFromSpreadsheet } from "./extractors";
 import { chunkText } from "./chunker";
 import { generateEmbeddings } from "./embeddings";
+import { hashChunk, diffChunks, type NewChunk } from "./chunk-diff";
+import { chunkRowId, loadExistingChunks, makeDeadline, checkDeadline } from "./chunk-store";
 import {
   markSyncStarted,
   markSyncCompleted,
@@ -21,6 +23,13 @@ import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessF
 
 // Maximum file size for processing (10 MB)
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+// Chunks per OpenAI embeddings request
+const EMBED_BATCH_SIZE = 20;
+// Chunk rows per Turso batch write (each row is ~35 KB with the embedding)
+const INSERT_BATCH_SIZE = 10;
+// Per-file time budget. Incremental writes mean hitting it loses no work.
+const FILE_DEADLINE_MS = 10 * 60 * 1000;
 
 // Result type for text extraction
 type ExtractResult =
@@ -99,6 +108,25 @@ async function isDualWriteEnabled(): Promise<boolean> {
     }
   }
   return dualWriteEnabled;
+}
+
+// Self-healing migration: the incremental chunk diff needs a content_hash
+// column. Additive only — existing rows get hashes backfilled lazily from
+// their stored text the first time their document is updated.
+let contentHashEnsured = false;
+async function ensureContentHashColumns(): Promise<void> {
+  if (contentHashEnsured) return;
+  for (const table of ["chunks", "document_vectors"]) {
+    try {
+      await db.execute(`ALTER TABLE ${table} ADD COLUMN content_hash TEXT`);
+      console.log(`[Schema] Added content_hash column to ${table}`);
+    } catch (error: any) {
+      if (!/duplicate column|no such table/i.test(error.message || "")) {
+        throw error;
+      }
+    }
+  }
+  contentHashEnsured = true;
 }
 
 // Safety threshold: if we have more than this many docs in DB but Google returns 0,
@@ -242,12 +270,108 @@ async function getStoredDocuments(userId: string): Promise<Map<string, StoredDoc
   return docs;
 }
 
+interface ChunkSyncResult {
+  /** Full chunk list for the new text (hashes included, no embeddings) */
+  chunks: NewChunk[];
+  /** Embeddings generated this run, keyed by content hash */
+  embeddingsByHash: Map<string, number[]>;
+  /** How many chunks were reused without re-embedding */
+  reused: number;
+}
+
+/**
+ * Bring the chunks table in line with the document's new text, incrementally.
+ *
+ * Only chunks whose content hash isn't already stored get embedded and
+ * inserted; unchanged chunks are left untouched (append-heavy docs re-embed
+ * just the tail). New chunks are inserted BEFORE stale ones are deleted, so a
+ * crash at any point leaves the search index intact-or-better — the document's
+ * stale timestamp makes the next sync converge.
+ *
+ * Exported for tests.
+ */
+export async function syncChunksIncrementally(
+  docId: string,
+  userId: string,
+  text: string,
+  deadline: number
+): Promise<ChunkSyncResult> {
+  const chunks: NewChunk[] = chunkText(text).map((c) => ({
+    index: c.index,
+    text: c.text,
+    hash: hashChunk(c.text),
+  }));
+
+  const existing = await loadExistingChunks("chunks", docId);
+  const diff = diffChunks(existing, chunks);
+  console.log(
+    `    Chunk diff: ${diff.kept} unchanged, ${diff.toEmbed.length} to embed, ${diff.toReindex.length} moved, ${diff.toDelete.length} stale`
+  );
+
+  const embeddingsByHash = new Map<string, number[]>();
+
+  for (let i = 0; i < diff.toEmbed.length; i += EMBED_BATCH_SIZE) {
+    checkDeadline(deadline, "embedding chunks");
+    const batch = diff.toEmbed.slice(i, i + EMBED_BATCH_SIZE);
+    const embeddings = await generateEmbeddings(batch.map((c) => c.text));
+    batch.forEach((c, j) => embeddingsByHash.set(c.hash, embeddings[j]!));
+
+    for (let j = 0; j < batch.length; j += INSERT_BATCH_SIZE) {
+      checkDeadline(deadline, "inserting chunks");
+      const rows = batch.slice(j, j + INSERT_BATCH_SIZE);
+      await withRetry("insert chunks", () =>
+        db.batch(
+          rows.map((c, k) => ({
+            sql: `INSERT OR IGNORE INTO chunks (id, document_id, user_id, chunk_index, text, embedding, content_hash)
+                  VALUES (?, ?, ?, ?, ?, vector(?), ?)`,
+            args: [
+              chunkRowId(docId, c.index, c.hash),
+              docId,
+              userId,
+              c.index,
+              c.text,
+              `[${embeddings[j + k]!.join(",")}]`,
+              c.hash,
+            ],
+          })),
+          "write"
+        )
+      );
+    }
+  }
+
+  if (diff.toReindex.length > 0) {
+    await withRetry("reindex chunks", () =>
+      db.batch(
+        diff.toReindex.map((m) => ({
+          sql: `UPDATE chunks SET chunk_index = ? WHERE id = ?`,
+          args: [m.newIndex, m.id],
+        })),
+        "write"
+      )
+    );
+  }
+
+  for (let i = 0; i < diff.toDelete.length; i += 100) {
+    const ids = diff.toDelete.slice(i, i + 100);
+    await withRetry("delete stale chunks", () =>
+      db.execute({
+        sql: `DELETE FROM chunks WHERE id IN (${ids.map(() => "?").join(",")})`,
+        args: ids,
+      })
+    );
+  }
+
+  return { chunks, embeddingsByHash, reused: diff.kept + diff.toReindex.length };
+}
+
 async function indexDocument(
   userId: string,
   tokens: GoogleTokens,
   doc: DriveDocument
 ): Promise<{ indexed: boolean; skipped?: boolean; skipReason?: string }> {
   console.log(`  Indexing: ${doc.name}`);
+  const deadline = makeDeadline(FILE_DEADLINE_MS);
 
   const result = await extractText(tokens, doc);
   if (!result.success) {
@@ -264,65 +388,36 @@ async function indexDocument(
     return { indexed: false, skipped: true, skipReason: "Document is empty" };
   }
 
-  const chunks = chunkText(text);
-  console.log(`    Created ${chunks.length} chunks`);
-
   const docId = uuid();
 
   // Insert document with a placeholder timestamp - we'll update it AFTER all chunks succeed.
   // This ensures that if we die mid-chunks, the next sync will see this doc needs re-indexing.
   const PLACEHOLDER_TIME = "1970-01-01T00:00:00.000Z";
-  await db.execute({
-    sql: `INSERT INTO documents (id, user_id, google_doc_id, title, full_text, google_modified_time)
-          VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [docId, userId, doc.id, doc.name, text, PLACEHOLDER_TIME],
-  });
+  // OR IGNORE keeps the retried insert idempotent if a timeout fired after
+  // the server actually committed
+  await withRetry("insert document", () =>
+    db.execute({
+      sql: `INSERT OR IGNORE INTO documents (id, user_id, google_doc_id, title, full_text, google_modified_time)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [docId, userId, doc.id, doc.name, text, PLACEHOLDER_TIME],
+    })
+  );
 
-  // Collect all chunks with embeddings for dual-write
-  const allChunksWithEmbeddings: Array<{ index: number; text: string; embedding: number[] }> = [];
-
-  // Process chunks in small batches to reduce memory usage
-  const CHUNK_BATCH_SIZE = 10;
-  for (let i = 0; i < chunks.length; i += CHUNK_BATCH_SIZE) {
-    const batchChunks = chunks.slice(i, i + CHUNK_BATCH_SIZE);
-    const batchTexts = batchChunks.map((c) => c.text);
-    const batchEmbeddings = await generateEmbeddings(batchTexts);
-
-    for (let j = 0; j < batchChunks.length; j++) {
-      const chunkId = uuid();
-      await db.execute({
-        sql: `INSERT INTO chunks (id, document_id, user_id, chunk_index, text, embedding)
-              VALUES (?, ?, ?, ?, ?, vector(?))`,
-        args: [
-          chunkId,
-          docId,
-          userId,
-          batchChunks[j]!.index,
-          batchChunks[j]!.text,
-          `[${batchEmbeddings[j]!.join(",")}]`,
-        ],
-      });
-
-      // Collect for dual-write
-      allChunksWithEmbeddings.push({
-        index: batchChunks[j]!.index,
-        text: batchChunks[j]!.text,
-        embedding: batchEmbeddings[j]!,
-      });
-    }
-  }
+  const chunkResult = await syncChunksIncrementally(docId, userId, text, deadline);
 
   // NOW update the timestamp - all chunks succeeded
-  await db.execute({
-    sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
-    args: [doc.modifiedTime, docId],
-  });
+  await withRetry("finalize document", () =>
+    db.execute({
+      sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
+      args: [doc.modifiedTime, docId],
+    })
+  );
 
-  console.log(`    Indexed ${chunks.length} chunks successfully`);
+  console.log(`    Indexed ${chunkResult.chunks.length} chunks (${chunkResult.embeddingsByHash.size} embedded)`);
 
   // Dual-write to V2 tables (non-blocking, errors are logged but don't fail sync)
   if (await isDualWriteEnabled()) {
-    await writeDocumentToV2(userId, doc.id, doc.name, text, doc.modifiedTime, allChunksWithEmbeddings);
+    await writeDocumentToV2(userId, doc.id, doc.name, text, doc.modifiedTime, chunkResult.chunks, chunkResult.embeddingsByHash, docId);
   }
 
   return { indexed: true };
@@ -335,6 +430,7 @@ async function updateDocument(
   driveDoc: DriveDocument
 ): Promise<{ updated: boolean; skipped?: boolean; skipReason?: string }> {
   console.log(`  Updating: ${driveDoc.name}`);
+  const deadline = makeDeadline(FILE_DEADLINE_MS);
 
   const result = await extractText(tokens, driveDoc);
   if (!result.success) {
@@ -367,70 +463,35 @@ async function updateDocument(
     return { updated: false, skipped: true, skipReason: "Document is empty" };
   }
 
-  // Delete old chunks first
-  await db.execute({
-    sql: "DELETE FROM chunks WHERE document_id = ?",
-    args: [storedDoc.id],
-  });
-
-  const chunks = chunkText(text);
-  console.log(`    Created ${chunks.length} chunks`);
-
   // Update document content but NOT the timestamp yet.
   // We'll update timestamp AFTER all chunks succeed.
   // This ensures if we die mid-chunks, next sync will re-index this doc.
-  await db.execute({
-    sql: `UPDATE documents
-          SET title = ?, full_text = ?, updated_at = datetime('now')
-          WHERE id = ?`,
-    args: [driveDoc.name, text, storedDoc.id],
-  });
+  await withRetry("update document", () =>
+    db.execute({
+      sql: `UPDATE documents
+            SET title = ?, full_text = ?, updated_at = datetime('now')
+            WHERE id = ?`,
+      args: [driveDoc.name, text, storedDoc.id],
+    })
+  );
 
-  // Collect all chunks with embeddings for dual-write
-  const allChunksWithEmbeddings: Array<{ index: number; text: string; embedding: number[] }> = [];
-
-  // Process chunks in small batches to reduce memory usage
-  const CHUNK_BATCH_SIZE = 10;
-  for (let i = 0; i < chunks.length; i += CHUNK_BATCH_SIZE) {
-    const batchChunks = chunks.slice(i, i + CHUNK_BATCH_SIZE);
-    const batchTexts = batchChunks.map((c) => c.text);
-    const batchEmbeddings = await generateEmbeddings(batchTexts);
-
-    for (let j = 0; j < batchChunks.length; j++) {
-      const chunkId = uuid();
-      await db.execute({
-        sql: `INSERT INTO chunks (id, document_id, user_id, chunk_index, text, embedding)
-              VALUES (?, ?, ?, ?, ?, vector(?))`,
-        args: [
-          chunkId,
-          storedDoc.id,
-          userId,
-          batchChunks[j]!.index,
-          batchChunks[j]!.text,
-          `[${batchEmbeddings[j]!.join(",")}]`,
-        ],
-      });
-
-      // Collect for dual-write
-      allChunksWithEmbeddings.push({
-        index: batchChunks[j]!.index,
-        text: batchChunks[j]!.text,
-        embedding: batchEmbeddings[j]!,
-      });
-    }
-  }
+  // Incremental: unchanged chunks stay in place, only new content is embedded,
+  // and stale chunks are deleted only after their replacements are inserted.
+  const chunkResult = await syncChunksIncrementally(storedDoc.id, userId, text, deadline);
 
   // NOW update the timestamp - all chunks succeeded
-  await db.execute({
-    sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
-    args: [driveDoc.modifiedTime, storedDoc.id],
-  });
+  await withRetry("finalize document", () =>
+    db.execute({
+      sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
+      args: [driveDoc.modifiedTime, storedDoc.id],
+    })
+  );
 
-  console.log(`    Updated ${chunks.length} chunks successfully`);
+  console.log(`    Updated: ${chunkResult.chunks.length} chunks (${chunkResult.embeddingsByHash.size} embedded, ${chunkResult.reused} reused)`);
 
   // Dual-write to V2 tables (non-blocking, errors are logged but don't fail sync)
   if (await isDualWriteEnabled()) {
-    await updateDocumentInV2(userId, driveDoc.id, driveDoc.name, text, driveDoc.modifiedTime, allChunksWithEmbeddings);
+    await updateDocumentInV2(userId, driveDoc.id, driveDoc.name, text, driveDoc.modifiedTime, chunkResult.chunks, chunkResult.embeddingsByHash, storedDoc.id);
   }
 
   return { updated: true };
@@ -471,6 +532,8 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
   }, 30_000);
 
   try {
+    await ensureContentHashColumns();
+
     const refreshedTokens = await refreshTokensIfNeeded(user.tokens);
     if (!refreshedTokens) {
       console.error(`  Authentication failed - skipping sync (documents preserved)`);

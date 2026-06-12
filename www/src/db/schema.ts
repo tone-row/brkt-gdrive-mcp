@@ -130,11 +130,20 @@ export async function runMigrations() {
       user_id TEXT NOT NULL,
       chunk_index INTEGER NOT NULL,
       text TEXT NOT NULL,
+      content_hash TEXT,
       embedding F32_BLOB(1536),
       FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
+
+  // Add content_hash column if missing (used by the sync server's incremental
+  // chunk diff; existing rows are backfilled lazily from stored text)
+  await db.execute(`
+    ALTER TABLE chunks ADD COLUMN content_hash TEXT
+  `).catch(() => {
+    // Column already exists, ignore error
+  });
 
   // Create vector index for similarity search
   await db.execute(`

@@ -94,6 +94,10 @@ export async function refreshTokensIfNeeded(tokens: GoogleTokens): Promise<Refre
   }
 }
 
+// Bound every Drive API request so a hung connection fails (and gets retried
+// at the file level on the next sync) instead of stalling the whole sync.
+const DRIVE_REQUEST_TIMEOUT_MS = 120_000;
+
 // Supported MIME types for indexing
 export const SUPPORTED_MIME_TYPES = [
   "application/vnd.google-apps.document", // Google Docs
@@ -119,12 +123,15 @@ export async function listSupportedFiles(tokens: GoogleTokens): Promise<DriveDoc
   const mimeQuery = SUPPORTED_MIME_TYPES.map((m) => `mimeType='${m}'`).join(" or ");
 
   do {
-    const response = await drive.files.list({
-      q: `(${mimeQuery}) and trashed=false`,
-      fields: "nextPageToken, files(id, name, modifiedTime, mimeType, size)",
-      pageSize: 100,
-      pageToken,
-    });
+    const response = await drive.files.list(
+      {
+        q: `(${mimeQuery}) and trashed=false`,
+        fields: "nextPageToken, files(id, name, modifiedTime, mimeType, size)",
+        pageSize: 100,
+        pageToken,
+      },
+      { timeout: DRIVE_REQUEST_TIMEOUT_MS }
+    );
 
     if (response.data.files) {
       for (const file of response.data.files) {
@@ -158,10 +165,10 @@ export async function exportDocAsText(tokens: GoogleTokens, docId: string): Prom
   const auth = getOAuthClient(tokens);
   const drive = google.drive({ version: "v3", auth });
 
-  const response = await drive.files.export({
-    fileId: docId,
-    mimeType: "text/plain",
-  });
+  const response = await drive.files.export(
+    { fileId: docId, mimeType: "text/plain" },
+    { timeout: DRIVE_REQUEST_TIMEOUT_MS }
+  );
 
   return response.data as string;
 }
@@ -175,7 +182,7 @@ export async function exportSheetAsXlsx(tokens: GoogleTokens, fileId: string): P
 
   const response = await drive.files.export(
     { fileId, mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
-    { responseType: "arraybuffer" }
+    { responseType: "arraybuffer", timeout: DRIVE_REQUEST_TIMEOUT_MS }
   );
 
   return Buffer.from(response.data as ArrayBuffer);
@@ -190,7 +197,7 @@ export async function downloadFile(tokens: GoogleTokens, fileId: string): Promis
 
   const response = await drive.files.get(
     { fileId, alt: "media" },
-    { responseType: "arraybuffer" }
+    { responseType: "arraybuffer", timeout: DRIVE_REQUEST_TIMEOUT_MS }
   );
 
   return Buffer.from(response.data as ArrayBuffer);
