@@ -107,6 +107,7 @@ export async function GET(request: NextRequest) {
       const unindexedResult = await db.execute({
         sql: `SELECT file_name, status, error FROM file_jobs
               WHERE user_id = ? AND status IN ('skipped', 'failed')
+                AND (error IS NULL OR error NOT LIKE '%is empty')
               ORDER BY status DESC, file_name ASC`,
         args: [user.id],
       });
