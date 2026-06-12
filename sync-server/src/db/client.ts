@@ -3,7 +3,9 @@ import { createClient } from "@libsql/client";
 // Force the stateless HTTP transport (libsql:// prefers WebSocket, where a
 // hung socket can stall a sync indefinitely) and bound every request so a
 // stuck connection fails fast instead of hanging until the runtime timeout.
-const TURSO_REQUEST_TIMEOUT_MS = 30_000;
+// 60s: DiskANN vector-index updates make chunk inserts genuinely slow
+// (observed >30s for 10-row batches under load).
+const TURSO_REQUEST_TIMEOUT_MS = 60_000;
 
 const url = process.env.TURSO_URL!.replace(/^libsql:/, "https:");
 
@@ -19,7 +21,7 @@ export const db = createClient({
  * Callers must be idempotent: an ambiguous failure (e.g. timeout after the
  * server committed) re-runs the whole operation.
  */
-export async function withRetry<T>(label: string, fn: () => Promise<T>, attempts = 3): Promise<T> {
+export async function withRetry<T>(label: string, fn: () => Promise<T>, attempts = 4): Promise<T> {
   let lastError: any;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {

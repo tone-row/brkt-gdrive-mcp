@@ -26,8 +26,9 @@ const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
 // Chunks per OpenAI embeddings request
 const EMBED_BATCH_SIZE = 20;
-// Chunk rows per Turso batch write (each row is ~35 KB with the embedding)
-const INSERT_BATCH_SIZE = 10;
+// Chunk rows per Turso batch write. Kept small: every row triggers a DiskANN
+// vector-index update server-side, observed at roughly 2-5s per row.
+const INSERT_BATCH_SIZE = 5;
 // Per-file time budget. Incremental writes mean hitting it loses no work.
 const FILE_DEADLINE_MS = 10 * 60 * 1000;
 

@@ -23,8 +23,9 @@ import { v4 as uuid } from "uuid";
 import { diffChunks, type NewChunk } from "./chunk-diff";
 import { chunkRowId, loadExistingChunks } from "./chunk-store";
 
-// Chunk rows per Turso batch write (each row is ~35 KB with the embedding)
-const INSERT_BATCH_SIZE = 10;
+// Chunk rows per Turso batch write. Kept small: every row triggers a DiskANN
+// vector-index update server-side, observed at roughly 2-5s per row.
+const INSERT_BATCH_SIZE = 5;
 
 // Matches the V1 placeholder convention: a doc carrying this timestamp is
 // known to have incomplete vectors and will be re-diffed on the next write.
