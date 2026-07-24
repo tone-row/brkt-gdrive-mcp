@@ -1,13 +1,8 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { drizzle } from "drizzle-orm/libsql";
-import { createClient } from "@libsql/client";
+import { db as client } from "../db/client";
 import * as authSchema from "../db/auth-schema";
-
-const client = createClient({
-  url: process.env.TURSO_URL!,
-  authToken: process.env.TURSO_AUTH_TOKEN,
-});
 
 const db = drizzle(client, { schema: authSchema });
 

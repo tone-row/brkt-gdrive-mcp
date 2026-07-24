@@ -145,10 +145,11 @@ export async function runMigrations() {
     // Column already exists, ignore error
   });
 
-  // Create vector index for similarity search
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks(libsql_vector_idx(embedding))
-  `);
+  // NOTE: chunks used to carry a DiskANN vector index (chunks_embedding_idx),
+  // but no query ever read it (search uses vector_top_k on the V2 index or an
+  // exact scan) while it made every chunk insert/delete pay seconds of index
+  // maintenance and grew multi-GB shadow tables. Dropped 2026-07-24 — do not
+  // recreate it.
 
   // Create index on document_id for faster lookups
   await db.execute(`

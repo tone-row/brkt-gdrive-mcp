@@ -7,6 +7,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Fail fast instead of grinding to the platform default and feeding client
+// retry pile-ups; DB requests are individually capped at 25s in db/client.ts.
+export const maxDuration = 60;
+
 // Feature flag to use new V2 vector table
 // Set USE_NEW_VECTOR_TABLE=true in environment to enable
 const USE_NEW_VECTOR_TABLE = process.env.USE_NEW_VECTOR_TABLE === "true";

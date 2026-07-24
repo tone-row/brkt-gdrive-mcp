@@ -7,6 +7,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Fail fast instead of grinding to the platform default and feeding client
+// retry pile-ups; DB requests are individually capped at 25s in db/client.ts.
+export const maxDuration = 60;
+
 // MCP Protocol version
 const PROTOCOL_VERSION = "2024-11-05";
 
