@@ -135,4 +135,14 @@ const orphans = await db.execute(`
 console.log(`\nSummary: ${ok} in sync, ${missing} missing, ${stale} stale, ${countMismatch} count-mismatched`);
 if (APPLY) console.log(`Rebuilt: ${rebuilt}, access rows added: ${missingAccess.rows.length}`);
 console.log(`Orphaned V2 docs (no access rows, reported only): ${orphans.rows[0]!.n}`);
+
+// --check (CI guardrail): exit nonzero on drift so a scheduled dry run fails
+// loudly. Orphans are excluded — they're report-only by design.
+if (process.argv.includes("--check")) {
+  const drift = missing + stale + countMismatch + missingAccess.rows.length;
+  if (drift > 0 && !APPLY) {
+    console.error(`\nDrift detected (${drift} item(s)) — run with --apply to heal.`);
+    process.exit(2);
+  }
+}
 process.exit(0);

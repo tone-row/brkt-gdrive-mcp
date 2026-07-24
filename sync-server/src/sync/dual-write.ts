@@ -31,6 +31,16 @@ const INSERT_BATCH_SIZE = 5;
 // known to have incomplete vectors and will be re-diffed on the next write.
 const PLACEHOLDER_TIME = "1970-01-01T00:00:00.000Z";
 
+// Swallowed V2 write failures are counted so sync results can surface them.
+// A failed V2 write is NOT retried until the doc's next Drive edit (the sync
+// loop only calls this module when the V1 doc changed), so with reads served
+// from V2 a silent failure is a search hole until reconcile-v2 heals it.
+let v2WriteErrors = 0;
+
+export function getV2WriteErrorCount(): number {
+  return v2WriteErrors;
+}
+
 /**
  * Check if the new V2 tables exist.
  * Returns false if they don't exist or if there's an error checking.
@@ -220,7 +230,8 @@ export async function writeDocumentToV2(
       args: [accessId, userId, docV2Id],
     });
   } catch (error: any) {
-    // Log but don't fail the sync - V2 tables are not the source of truth yet
+    // Log but don't fail the sync — V1 remains the write-side source of truth
+    v2WriteErrors++;
     console.error(`    [V2] Failed to write to new tables: ${error.message}`);
   }
 }
@@ -280,6 +291,7 @@ export async function removeUserAccessFromV2(
     // because another user might add it later. Cleanup of orphaned documents
     // would be a separate maintenance task.
   } catch (error: any) {
+    v2WriteErrors++;
     console.error(`    [V2] Failed to remove access from new tables: ${error.message}`);
   }
 }

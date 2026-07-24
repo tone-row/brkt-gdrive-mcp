@@ -19,7 +19,7 @@ import {
   markFileSkipped,
 } from "./status";
 import { v4 as uuid } from "uuid";
-import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessFromV2 } from "./dual-write";
+import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessFromV2, getV2WriteErrorCount } from "./dual-write";
 
 // Maximum file size for processing (10 MB)
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -559,8 +559,9 @@ async function deleteDocument(storedDoc: StoredDocument, userId: string): Promis
 /**
  * Sync a single user's Google Drive documents
  */
-async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; authFailed?: boolean; alreadySyncing?: boolean }> {
+async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; v2WriteErrors?: number; authFailed?: boolean; alreadySyncing?: boolean }> {
   console.log(`\nSyncing user: ${user.email}`);
+  const v2ErrorsAtStart = getV2WriteErrorCount();
 
   // Check if sync is already in progress for this user
   const canStart = await markSyncStarted(user.userId);
@@ -719,7 +720,13 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
       await updateV2Progress(user.userId, filesProcessed, filesFailed);
     }
 
-    const result = { added: filesAdded, updated: filesUpdated, deleted: toDelete.length };
+    const v2WriteErrors = getV2WriteErrorCount() - v2ErrorsAtStart;
+    if (v2WriteErrors > 0) {
+      // Reads are served from V2: a swallowed V2 write failure is a silent
+      // search hole until the doc's next edit or a reconcile-v2 run.
+      console.warn(`  ⚠️  ${v2WriteErrors} V2 write failure(s) this sync — run scripts/reconcile-v2.ts`);
+    }
+    const result = { added: filesAdded, updated: filesUpdated, deleted: toDelete.length, v2WriteErrors };
     await markSyncCompleted(user.userId, result);
     return result;
 
@@ -776,6 +783,10 @@ export async function sync(): Promise<{
   console.log("Sync completed!");
   console.log(`Total: +${totalAdded} added, ~${totalUpdated} updated, -${totalDeleted} deleted`);
   console.log(`Users processed: ${users.length}, Auth failures: ${authFailures}`);
+  const totalV2WriteErrors = getV2WriteErrorCount();
+  if (totalV2WriteErrors > 0) {
+    console.warn(`⚠️  V2 write failures this run: ${totalV2WriteErrors} — affected docs are missing from search until reconciled (scripts/reconcile-v2.ts)`);
+  }
   console.log("========================================");
 
   return {
