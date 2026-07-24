@@ -358,9 +358,13 @@ export async function runMigrations() {
     )
   `);
 
-  // Vector index for similarity search
+  // Vector index for similarity search. Tuned: default DiskANN settings
+  // store ~50 full-precision neighbor vectors per node, which ballooned a
+  // 580MB database to 4.8GB. float8 neighbors + max_neighbors=20 keep the
+  // index ~500MB at 99.5% measured recall@10. If this DDL ever changes,
+  // rebuild the index (drop + create) — options only apply at creation.
   await db.execute(`
-    CREATE INDEX IF NOT EXISTS document_vectors_embedding_idx ON document_vectors(libsql_vector_idx(embedding))
+    CREATE INDEX IF NOT EXISTS document_vectors_embedding_idx ON document_vectors(libsql_vector_idx(embedding, 'compress_neighbors=float8', 'max_neighbors=20'))
   `);
 
   // Index on document_id for fast chunk lookups

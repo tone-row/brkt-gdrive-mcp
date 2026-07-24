@@ -127,8 +127,10 @@ async function main() {
     )
   `);
 
+  // Tuned to match schema.ts: float8 neighbors + max_neighbors=20 keep the
+  // index ~500MB instead of ~4GB at default settings (99.5% recall@10).
   await db.execute(`
-    CREATE INDEX IF NOT EXISTS document_vectors_embedding_idx ON document_vectors(libsql_vector_idx(embedding))
+    CREATE INDEX IF NOT EXISTS document_vectors_embedding_idx ON document_vectors(libsql_vector_idx(embedding, 'compress_neighbors=float8', 'max_neighbors=20'))
   `);
 
   await db.execute(`
