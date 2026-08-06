@@ -16,9 +16,10 @@ export async function GET(
 
     const result = await db.execute({
       sql: `
-        SELECT id, google_doc_id, title, full_text, google_modified_time, created_at, updated_at
-        FROM documents
-        WHERE id = ? AND user_id = ?
+        SELECT d.id, d.google_doc_id, d.title, d.full_text, d.google_modified_time, d.created_at, d.updated_at
+        FROM documents_v2 d
+        JOIN user_document_access uda ON uda.document_id = d.id
+        WHERE d.id = ? AND uda.user_id = ?
       `,
       args: [id, userId],
     });

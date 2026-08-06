@@ -12,12 +12,6 @@ const openai = new OpenAI({
 // retry pile-ups; DB requests are individually capped at 25s in db/client.ts.
 export const maxDuration = 60;
 
-// Serve reads from the deduplicated V2 tables (documents_v2 /
-// document_vectors / user_document_access). V1 and V2 document IDs differ,
-// so search, list_documents, and expand_document must flip together — search
-// returns IDs that expand_document later looks up.
-const USE_NEW_VECTOR_TABLE = process.env.USE_NEW_VECTOR_TABLE === "true";
-
 // MCP Protocol version
 const PROTOCOL_VERSION = "2024-11-05";
 
@@ -78,36 +72,7 @@ async function executeSearch(userId: string, query: string, limit: number = 10) 
   });
   const queryEmbedding = embeddingResponse.data[0]!.embedding;
 
-  let results;
-  if (USE_NEW_VECTOR_TABLE) {
-    results = await searchV2(userId, queryEmbedding, limit);
-  } else {
-    // V1 vector search (filtered by user_id)
-    const result = await db.execute({
-      sql: `
-        SELECT
-          c.document_id,
-          d.title as document_title,
-          c.chunk_index,
-          c.text as chunk_text,
-          vector_distance_cos(c.embedding, vector(?)) as distance
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-        WHERE c.user_id = ?
-        ORDER BY distance ASC
-        LIMIT ?
-      `,
-      args: [`[${queryEmbedding.join(",")}]`, userId, limit],
-    });
-
-    results = result.rows.map((row) => ({
-      document_id: row.document_id as string,
-      document_title: row.document_title as string,
-      chunk_index: row.chunk_index as number,
-      chunk_text: row.chunk_text as string,
-      similarity: 1 - (row.distance as number),
-    }));
-  }
+  const results = await searchV2(userId, queryEmbedding, limit);
 
   if (results.length === 0) {
     return "No matching documents found.";
@@ -125,23 +90,16 @@ ${r.chunk_text}
 }
 
 async function executeListDocuments(userId: string) {
-  const result = await db.execute(
-    USE_NEW_VECTOR_TABLE
-      ? {
-          sql: `
-            SELECT d.id, d.title, d.google_modified_time
-            FROM documents_v2 d
-            JOIN user_document_access uda ON uda.document_id = d.id
-            WHERE uda.user_id = ?
-            ORDER BY d.title
-          `,
-          args: [userId],
-        }
-      : {
-          sql: `SELECT id, title, google_modified_time FROM documents WHERE user_id = ? ORDER BY title`,
-          args: [userId],
-        }
-  );
+  const result = await db.execute({
+    sql: `
+      SELECT d.id, d.title, d.google_modified_time
+      FROM documents_v2 d
+      JOIN user_document_access uda ON uda.document_id = d.id
+      WHERE uda.user_id = ?
+      ORDER BY d.title
+    `,
+    args: [userId],
+  });
 
   const documents = result.rows.map((row) => ({
     id: row.id as string,
@@ -163,37 +121,30 @@ async function executeListDocuments(userId: string) {
 }
 
 async function executeExpandDocument(userId: string, documentId: string) {
-  let result;
-  if (USE_NEW_VECTOR_TABLE) {
+  let result = await db.execute({
+    sql: `
+      SELECT d.id, d.title, d.full_text, d.google_modified_time
+      FROM documents_v2 d
+      JOIN user_document_access uda ON uda.document_id = d.id AND uda.user_id = ?
+      WHERE d.id = ?
+    `,
+    args: [userId, documentId],
+  });
+
+  if (result.rows.length === 0) {
+    // Compat shim: the ID may be a V1 documents.id remembered from a
+    // conversation that predates the V2 cutover. Resolve it via
+    // google_doc_id to the V2 row (still access-checked). The V1 documents
+    // table is frozen (no longer written) but its IDs stay resolvable.
     result = await db.execute({
       sql: `
         SELECT d.id, d.title, d.full_text, d.google_modified_time
-        FROM documents_v2 d
+        FROM documents v1
+        JOIN documents_v2 d ON d.google_doc_id = v1.google_doc_id
         JOIN user_document_access uda ON uda.document_id = d.id AND uda.user_id = ?
-        WHERE d.id = ?
+        WHERE v1.id = ?
       `,
       args: [userId, documentId],
-    });
-
-    if (result.rows.length === 0) {
-      // Compat shim: the ID may be a V1 documents.id remembered from a
-      // conversation that predates the V2 cutover. Resolve it via
-      // google_doc_id to the V2 row (still access-checked).
-      result = await db.execute({
-        sql: `
-          SELECT d.id, d.title, d.full_text, d.google_modified_time
-          FROM documents v1
-          JOIN documents_v2 d ON d.google_doc_id = v1.google_doc_id
-          JOIN user_document_access uda ON uda.document_id = d.id AND uda.user_id = ?
-          WHERE v1.id = ?
-        `,
-        args: [userId, documentId],
-      });
-    }
-  } else {
-    result = await db.execute({
-      sql: `SELECT id, title, full_text, google_modified_time FROM documents WHERE id = ? AND user_id = ?`,
-      args: [documentId, userId],
     });
   }
 

@@ -11,10 +11,11 @@ export async function GET(request: NextRequest) {
 
     const result = await db.execute({
       sql: `
-        SELECT id, google_doc_id, title, google_modified_time, created_at, updated_at
-        FROM documents
-        WHERE user_id = ?
-        ORDER BY updated_at DESC
+        SELECT d.id, d.google_doc_id, d.title, d.google_modified_time, d.created_at, d.updated_at
+        FROM documents_v2 d
+        JOIN user_document_access uda ON uda.document_id = d.id
+        WHERE uda.user_id = ?
+        ORDER BY d.updated_at DESC
       `,
       args: [userId],
     });

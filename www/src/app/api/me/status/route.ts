@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth-helper";
 import { db } from "@/db/client";
-import { getSyncStatus } from "@/sync/status";
-
-// Feature flag to use V2 sync state table
-const USE_V2_SYNC_STATE = process.env.USE_V2_SYNC_STATE === "true";
 
 // Timeout for stale workers (2 minutes)
 const WORKER_STALE_TIMEOUT_SECONDS = 120;
@@ -82,16 +78,19 @@ export async function GET(request: NextRequest) {
     const hasGoogleAccount = accountResult.rows.length > 0;
     const hasValidToken = hasGoogleAccount && accountResult.rows[0]!.access_token;
 
-    // Get document count
+    // Get document count (docs this user has access to)
     const docResult = await db.execute({
-      sql: `SELECT COUNT(*) as count FROM documents WHERE user_id = ?`,
+      sql: `SELECT COUNT(*) as count FROM user_document_access WHERE user_id = ?`,
       args: [user.id],
     });
     const documentCount = (docResult.rows[0]?.count as number) || 0;
 
-    // Get chunk count
+    // Get chunk count (vectors across the user's accessible docs)
     const chunkResult = await db.execute({
-      sql: `SELECT COUNT(*) as count FROM chunks WHERE user_id = ?`,
+      sql: `SELECT COUNT(*) as count
+            FROM document_vectors dv
+            JOIN user_document_access uda ON uda.document_id = dv.document_id
+            WHERE uda.user_id = ?`,
       args: [user.id],
     });
     const chunkCount = (chunkResult.rows[0]?.count as number) || 0;
@@ -120,49 +119,17 @@ export async function GET(request: NextRequest) {
       // file_jobs table might not exist yet
     }
 
-    // Get sync status from V2 table if enabled, otherwise use V1
-    if (USE_V2_SYNC_STATE) {
-      const v2Status = await getV2SyncStatus(user.id);
+    const v2Status = await getV2SyncStatus(user.id);
 
-      // Map V2 status to a format compatible with V1
-      let mappedStatus: "idle" | "syncing" | "failed" = "idle";
-      if (v2Status) {
-        if (v2Status.status === "discovering" || v2Status.status === "processing") {
-          mappedStatus = "syncing";
-        } else if (v2Status.status === "failed") {
-          mappedStatus = "failed";
-        }
+    // Map V2 status to the dashboard's simplified status vocabulary
+    let mappedStatus: "idle" | "syncing" | "failed" = "idle";
+    if (v2Status) {
+      if (v2Status.status === "discovering" || v2Status.status === "processing") {
+        mappedStatus = "syncing";
+      } else if (v2Status.status === "failed") {
+        mappedStatus = "failed";
       }
-
-      return NextResponse.json({
-        googleConnected: !!hasValidToken,
-        needsReconnect,
-        documentCount,
-        chunkCount,
-        unindexedFiles,
-        syncStatus: v2Status ? {
-          status: mappedStatus,
-          startedAt: v2Status.startedAt,
-          completedAt: v2Status.completedAt,
-          lastResult: v2Status.lastResult,
-          error: v2Status.error,
-          // V2-specific fields
-          progress: v2Status.totalFilesDiscovered > 0
-            ? {
-                totalFiles: v2Status.totalFilesDiscovered,
-                filesProcessed: v2Status.filesProcessed,
-                filesFailed: v2Status.filesFailed,
-                percentComplete: Math.round(
-                  (v2Status.filesProcessed / v2Status.totalFilesDiscovered) * 100
-                ),
-              }
-            : null,
-        } : null,
-      });
     }
-
-    // V1 path: use original sync_status table
-    const syncStatus = await getSyncStatus(user.id);
 
     return NextResponse.json({
       googleConnected: !!hasValidToken,
@@ -170,12 +137,22 @@ export async function GET(request: NextRequest) {
       documentCount,
       chunkCount,
       unindexedFiles,
-      syncStatus: syncStatus ? {
-        status: syncStatus.status,
-        startedAt: syncStatus.startedAt,
-        completedAt: syncStatus.completedAt,
-        lastResult: syncStatus.lastResult,
-        error: syncStatus.error,
+      syncStatus: v2Status ? {
+        status: mappedStatus,
+        startedAt: v2Status.startedAt,
+        completedAt: v2Status.completedAt,
+        lastResult: v2Status.lastResult,
+        error: v2Status.error,
+        progress: v2Status.totalFilesDiscovered > 0
+          ? {
+              totalFiles: v2Status.totalFilesDiscovered,
+              filesProcessed: v2Status.filesProcessed,
+              filesFailed: v2Status.filesFailed,
+              percentComplete: Math.round(
+                (v2Status.filesProcessed / v2Status.totalFilesDiscovered) * 100
+              ),
+            }
+          : null,
       } : null,
     });
   } catch (error) {
