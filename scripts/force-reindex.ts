@@ -24,20 +24,19 @@ async function main() {
   // Get current state
   const before = await db.execute(`
     SELECT COUNT(*) as doc_count,
-           (SELECT COUNT(*) FROM chunks) as chunk_count
-    FROM documents
+           (SELECT COUNT(*) FROM document_vectors) as vector_count
+    FROM documents_v2
   `);
 
   console.log("Current state:");
   console.log(`  ${before.rows[0]?.doc_count} documents`);
-  console.log(`  ${before.rows[0]?.chunk_count} chunks\n`);
+  console.log(`  ${before.rows[0]?.vector_count} vectors\n`);
 
   // Confirm
   console.log("This will reset ALL document timestamps to force a complete re-index.");
-  console.log("The next sync will:");
-  console.log("  1. Delete all existing chunks");
-  console.log("  2. Re-fetch and re-index every document from Google Drive");
-  console.log("  3. Regenerate all embeddings\n");
+  console.log("The next sync will re-fetch every document from Google Drive and");
+  console.log("re-diff its chunks (unchanged chunks are NOT re-embedded — the");
+  console.log("content-hash diff reuses their stored vectors).\n");
 
   const readline = await import("readline");
   const rl = readline.createInterface({
@@ -57,7 +56,7 @@ async function main() {
 
   // Reset all timestamps
   const result = await db.execute({
-    sql: `UPDATE documents SET google_modified_time = ?`,
+    sql: `UPDATE documents_v2 SET google_modified_time = ?`,
     args: [PLACEHOLDER_TIME],
   });
 

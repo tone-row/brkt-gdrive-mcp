@@ -1,10 +1,7 @@
-import { db, withRetry } from "../db/client";
+import { db } from "../db/client";
 import { listSupportedFiles, exportDocAsText, exportSheetAsXlsx, downloadFile, refreshTokensIfNeeded, type DriveDocument, type GoogleTokens, type RefreshedTokens } from "./google-drive";
 import { extractTextFromPdf, extractTextFromDocx, extractTextFromDoc, extractTextFromSpreadsheet } from "./extractors";
-import { chunkText } from "./chunker";
-import { generateEmbeddings } from "./embeddings";
-import { hashChunk, diffChunks, type NewChunk } from "./chunk-diff";
-import { chunkRowId, loadExistingChunks, makeDeadline, checkDeadline } from "./chunk-store";
+import { makeDeadline } from "./chunk-store";
 import {
   markSyncStarted,
   markSyncCompleted,
@@ -18,8 +15,13 @@ import {
   markFileFailed,
   markFileSkipped,
 } from "./status";
-import { v4 as uuid } from "uuid";
-import { v2TablesExist, writeDocumentToV2, updateDocumentInV2, removeUserAccessFromV2, getV2WriteErrorCount } from "./dual-write";
+import {
+  PLACEHOLDER_TIME,
+  resolveDocV2,
+  upsertUserAccess,
+  removeUserAccess,
+  writeDocumentV2,
+} from "./v2-store";
 
 // Maximum file size for processing (10 MB)
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -42,11 +44,6 @@ function oversizeReason(text: string): string | null {
   return `Document exceeds the ingestion size limit (${mb} MB of text, max 2 MB)`;
 }
 
-// Chunks per OpenAI embeddings request
-const EMBED_BATCH_SIZE = 20;
-// Chunk rows per Turso batch write. Kept small: every row triggers a DiskANN
-// vector-index update server-side, observed at roughly 2-5s per row.
-const INSERT_BATCH_SIZE = 5;
 // Per-file time budget. Incremental writes mean hitting it loses no work.
 const FILE_DEADLINE_MS = 10 * 60 * 1000;
 
@@ -119,34 +116,18 @@ async function extractText(tokens: GoogleTokens, file: DriveDocument): Promise<E
   }
 }
 
-// Flag to enable/disable dual-write to V2 tables
-// Set to true after running Phase 1 and Phase 2 migrations
-let dualWriteEnabled: boolean | null = null;
-
-async function isDualWriteEnabled(): Promise<boolean> {
-  if (dualWriteEnabled === null) {
-    dualWriteEnabled = await v2TablesExist();
-    if (dualWriteEnabled) {
-      console.log("[Dual-Write] V2 tables detected, dual-write enabled");
-    }
-  }
-  return dualWriteEnabled;
-}
-
 // Self-healing migration: the incremental chunk diff needs a content_hash
 // column. Additive only — existing rows get hashes backfilled lazily from
 // their stored text the first time their document is updated.
 let contentHashEnsured = false;
 async function ensureContentHashColumns(): Promise<void> {
   if (contentHashEnsured) return;
-  for (const table of ["chunks", "document_vectors"]) {
-    try {
-      await db.execute(`ALTER TABLE ${table} ADD COLUMN content_hash TEXT`);
-      console.log(`[Schema] Added content_hash column to ${table}`);
-    } catch (error: any) {
-      if (!/duplicate column|no such table/i.test(error.message || "")) {
-        throw error;
-      }
+  try {
+    await db.execute(`ALTER TABLE document_vectors ADD COLUMN content_hash TEXT`);
+    console.log(`[Schema] Added content_hash column to document_vectors`);
+  } catch (error: any) {
+    if (!/duplicate column/i.test(error.message || "")) {
+      throw error;
     }
   }
   contentHashEnsured = true;
@@ -275,11 +256,14 @@ async function markAccountNeedsReauth(userId: string): Promise<void> {
 }
 
 /**
- * Get stored documents for a specific user
+ * Get the documents a user has access to (their view of the shared V2 corpus)
  */
 async function getStoredDocuments(userId: string): Promise<Map<string, StoredDocument>> {
   const result = await db.execute({
-    sql: "SELECT id, google_doc_id, google_modified_time FROM documents WHERE user_id = ?",
+    sql: `SELECT d.id, d.google_doc_id, d.google_modified_time
+          FROM documents_v2 d
+          JOIN user_document_access uda ON uda.document_id = d.id
+          WHERE uda.user_id = ?`,
     args: [userId],
   });
   const docs = new Map<string, StoredDocument>();
@@ -293,101 +277,6 @@ async function getStoredDocuments(userId: string): Promise<Map<string, StoredDoc
   return docs;
 }
 
-interface ChunkSyncResult {
-  /** Full chunk list for the new text (hashes included, no embeddings) */
-  chunks: NewChunk[];
-  /** Embeddings generated this run, keyed by content hash */
-  embeddingsByHash: Map<string, number[]>;
-  /** How many chunks were reused without re-embedding */
-  reused: number;
-}
-
-/**
- * Bring the chunks table in line with the document's new text, incrementally.
- *
- * Only chunks whose content hash isn't already stored get embedded and
- * inserted; unchanged chunks are left untouched (append-heavy docs re-embed
- * just the tail). New chunks are inserted BEFORE stale ones are deleted, so a
- * crash at any point leaves the search index intact-or-better — the document's
- * stale timestamp makes the next sync converge.
- *
- * Exported for tests.
- */
-export async function syncChunksIncrementally(
-  docId: string,
-  userId: string,
-  text: string,
-  deadline: number
-): Promise<ChunkSyncResult> {
-  const chunks: NewChunk[] = chunkText(text).map((c) => ({
-    index: c.index,
-    text: c.text,
-    hash: hashChunk(c.text),
-  }));
-
-  const existing = await loadExistingChunks("chunks", docId);
-  const diff = diffChunks(existing, chunks);
-  console.log(
-    `    Chunk diff: ${diff.kept} unchanged, ${diff.toEmbed.length} to embed, ${diff.toReindex.length} moved, ${diff.toDelete.length} stale`
-  );
-
-  const embeddingsByHash = new Map<string, number[]>();
-
-  for (let i = 0; i < diff.toEmbed.length; i += EMBED_BATCH_SIZE) {
-    checkDeadline(deadline, "embedding chunks");
-    const batch = diff.toEmbed.slice(i, i + EMBED_BATCH_SIZE);
-    const embeddings = await generateEmbeddings(batch.map((c) => c.text));
-    batch.forEach((c, j) => embeddingsByHash.set(c.hash, embeddings[j]!));
-
-    for (let j = 0; j < batch.length; j += INSERT_BATCH_SIZE) {
-      checkDeadline(deadline, "inserting chunks");
-      const rows = batch.slice(j, j + INSERT_BATCH_SIZE);
-      await withRetry("insert chunks", () =>
-        db.batch(
-          rows.map((c, k) => ({
-            sql: `INSERT OR IGNORE INTO chunks (id, document_id, user_id, chunk_index, text, embedding, content_hash)
-                  VALUES (?, ?, ?, ?, ?, vector(?), ?)`,
-            args: [
-              chunkRowId(docId, c.index, c.hash),
-              docId,
-              userId,
-              c.index,
-              c.text,
-              `[${embeddings[j + k]!.join(",")}]`,
-              c.hash,
-            ],
-          })),
-          "write"
-        )
-      );
-    }
-  }
-
-  if (diff.toReindex.length > 0) {
-    await withRetry("reindex chunks", () =>
-      db.batch(
-        diff.toReindex.map((m) => ({
-          sql: `UPDATE chunks SET chunk_index = ? WHERE id = ?`,
-          args: [m.newIndex, m.id],
-        })),
-        "write"
-      )
-    );
-  }
-
-  for (let i = 0; i < diff.toDelete.length; i += 100) {
-    const ids = diff.toDelete.slice(i, i + 100);
-    await withRetry("delete stale chunks", () =>
-      db.execute({
-        sql: `DELETE FROM chunks WHERE id IN (${ids.map(() => "?").join(",")})`,
-        args: ids,
-      })
-    );
-  }
-
-  return { chunks, embeddingsByHash, reused: diff.kept + diff.toReindex.length };
-}
-
 async function indexDocument(
   userId: string,
   tokens: GoogleTokens,
@@ -395,6 +284,15 @@ async function indexDocument(
 ): Promise<{ indexed: boolean; skipped?: boolean; skipReason?: string }> {
   console.log(`  Indexing: ${doc.name}`);
   const deadline = makeDeadline(FILE_DEADLINE_MS);
+
+  // Shared-doc fast path: another user already indexed this exact (or newer)
+  // version — just grant access, no download or embedding needed.
+  const existing = await resolveDocV2(doc.id);
+  if (existing && existing.modifiedTime !== PLACEHOLDER_TIME && existing.modifiedTime >= doc.modifiedTime) {
+    await upsertUserAccess(userId, existing.id);
+    console.log(`    Already indexed (shared) — granted access`);
+    return { indexed: true };
+  }
 
   const result = await extractText(tokens, doc);
   if (!result.success) {
@@ -417,38 +315,8 @@ async function indexDocument(
     return { indexed: false, skipped: true, skipReason: oversize };
   }
 
-  const docId = uuid();
-
-  // Insert document with a placeholder timestamp - we'll update it AFTER all chunks succeed.
-  // This ensures that if we die mid-chunks, the next sync will see this doc needs re-indexing.
-  const PLACEHOLDER_TIME = "1970-01-01T00:00:00.000Z";
-  // OR IGNORE keeps the retried insert idempotent if a timeout fired after
-  // the server actually committed
-  await withRetry("insert document", () =>
-    db.execute({
-      sql: `INSERT OR IGNORE INTO documents (id, user_id, google_doc_id, title, full_text, google_modified_time)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [docId, userId, doc.id, doc.name, text, PLACEHOLDER_TIME],
-    })
-  );
-
-  const chunkResult = await syncChunksIncrementally(docId, userId, text, deadline);
-
-  // NOW update the timestamp - all chunks succeeded
-  await withRetry("finalize document", () =>
-    db.execute({
-      sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
-      args: [doc.modifiedTime, docId],
-    })
-  );
-
-  console.log(`    Indexed ${chunkResult.chunks.length} chunks (${chunkResult.embeddingsByHash.size} embedded)`);
-
-  // Dual-write to V2 tables (non-blocking, errors are logged but don't fail sync)
-  if (await isDualWriteEnabled()) {
-    await writeDocumentToV2(userId, doc.id, doc.name, text, doc.modifiedTime, chunkResult.chunks, chunkResult.embeddingsByHash, docId);
-  }
-
+  const written = await writeDocumentV2(userId, doc.id, doc.name, text, doc.modifiedTime, deadline);
+  console.log(`    Indexed (${written.embedded} embedded, ${written.reused} reused)`);
   return { indexed: true };
 }
 
@@ -461,18 +329,22 @@ async function updateDocument(
   console.log(`  Updating: ${driveDoc.name}`);
   const deadline = makeDeadline(FILE_DEADLINE_MS);
 
+  // Another user's sync may have written this version already — re-check
+  // before downloading anything.
+  const current = await resolveDocV2(driveDoc.id);
+  if (current && current.modifiedTime !== PLACEHOLDER_TIME && current.modifiedTime >= driveDoc.modifiedTime) {
+    await upsertUserAccess(userId, current.id);
+    console.log(`    Already up to date (synced by another user)`);
+    return { updated: true };
+  }
+
   const result = await extractText(tokens, driveDoc);
   if (!result.success) {
     if (result.skip) {
       console.log(`    Skipping: ${result.reason}`);
-      // Delete the stored doc since we can no longer process this file
-      await db.execute({
-        sql: "DELETE FROM documents WHERE id = ?",
-        args: [storedDoc.id],
-      });
-      if (await isDualWriteEnabled()) {
-        await removeUserAccessFromV2(userId, driveDoc.id);
-      }
+      // We can no longer process this file — drop this user's access to the
+      // stale index (the documents_v2 row survives for other users)
+      await removeUserAccess(userId, driveDoc.id);
       return { updated: false, skipped: true, skipReason: result.reason };
     }
     throw new Error(result.error);
@@ -481,14 +353,7 @@ async function updateDocument(
   const text = result.text;
   if (!text || text.trim().length === 0) {
     console.log(`    Skipping empty document: ${driveDoc.name}`);
-    await db.execute({
-      sql: "DELETE FROM documents WHERE id = ?",
-      args: [storedDoc.id],
-    });
-    // Also remove from V2 if dual-write is enabled
-    if (await isDualWriteEnabled()) {
-      await removeUserAccessFromV2(userId, driveDoc.id);
-    }
+    await removeUserAccess(userId, driveDoc.id);
     return { updated: false, skipped: true, skipReason: "Document is empty" };
   }
 
@@ -506,62 +371,23 @@ async function updateDocument(
     };
   }
 
-  // Update document content but NOT the timestamp yet.
-  // We'll update timestamp AFTER all chunks succeed.
-  // This ensures if we die mid-chunks, next sync will re-index this doc.
-  await withRetry("update document", () =>
-    db.execute({
-      sql: `UPDATE documents
-            SET title = ?, full_text = ?, updated_at = datetime('now')
-            WHERE id = ?`,
-      args: [driveDoc.name, text, storedDoc.id],
-    })
-  );
-
-  // Incremental: unchanged chunks stay in place, only new content is embedded,
-  // and stale chunks are deleted only after their replacements are inserted.
-  const chunkResult = await syncChunksIncrementally(storedDoc.id, userId, text, deadline);
-
-  // NOW update the timestamp - all chunks succeeded
-  await withRetry("finalize document", () =>
-    db.execute({
-      sql: `UPDATE documents SET google_modified_time = ? WHERE id = ?`,
-      args: [driveDoc.modifiedTime, storedDoc.id],
-    })
-  );
-
-  console.log(`    Updated: ${chunkResult.chunks.length} chunks (${chunkResult.embeddingsByHash.size} embedded, ${chunkResult.reused} reused)`);
-
-  // Dual-write to V2 tables (non-blocking, errors are logged but don't fail sync)
-  if (await isDualWriteEnabled()) {
-    await updateDocumentInV2(userId, driveDoc.id, driveDoc.name, text, driveDoc.modifiedTime, chunkResult.chunks, chunkResult.embeddingsByHash, storedDoc.id);
-  }
-
+  const written = await writeDocumentV2(userId, driveDoc.id, driveDoc.name, text, driveDoc.modifiedTime, deadline);
+  console.log(`    Updated (${written.embedded} embedded, ${written.reused} reused)`);
   return { updated: true };
 }
 
 async function deleteDocument(storedDoc: StoredDocument, userId: string): Promise<void> {
-  console.log(`  Deleting document: ${storedDoc.google_doc_id}`);
-
-  await db.execute({
-    sql: "DELETE FROM documents WHERE id = ?",
-    args: [storedDoc.id],
-  });
-
-  console.log(`    Deleted successfully`);
-
-  // Also remove from V2 if dual-write is enabled
-  if (await isDualWriteEnabled()) {
-    await removeUserAccessFromV2(userId, storedDoc.google_doc_id);
-  }
+  console.log(`  Removing access: ${storedDoc.google_doc_id}`);
+  // The user lost access in Drive — drop only their access row. The document
+  // and its vectors survive for other users (or as a reclaimable orphan).
+  await removeUserAccess(userId, storedDoc.google_doc_id);
 }
 
 /**
  * Sync a single user's Google Drive documents
  */
-async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; v2WriteErrors?: number; authFailed?: boolean; alreadySyncing?: boolean }> {
+async function syncUser(user: UserWithTokens): Promise<{ added: number; updated: number; deleted: number; authFailed?: boolean; alreadySyncing?: boolean }> {
   console.log(`\nSyncing user: ${user.email}`);
-  const v2ErrorsAtStart = getV2WriteErrorCount();
 
   // Check if sync is already in progress for this user
   const canStart = await markSyncStarted(user.userId);
@@ -644,9 +470,6 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
     const toAdd: DriveDocument[] = [];
     const toUpdate: { stored: StoredDocument; drive: DriveDocument }[] = [];
 
-    // Placeholder timestamp used for incomplete indexing
-    const PLACEHOLDER_TIME = "1970-01-01T00:00:00.000Z";
-
     for (const driveDoc of driveDocs) {
       const storedDoc = storedDocs.get(driveDoc.id);
       if (!storedDoc) {
@@ -720,13 +543,7 @@ async function syncUser(user: UserWithTokens): Promise<{ added: number; updated:
       await updateV2Progress(user.userId, filesProcessed, filesFailed);
     }
 
-    const v2WriteErrors = getV2WriteErrorCount() - v2ErrorsAtStart;
-    if (v2WriteErrors > 0) {
-      // Reads are served from V2: a swallowed V2 write failure is a silent
-      // search hole until the doc's next edit or a reconcile-v2 run.
-      console.warn(`  ⚠️  ${v2WriteErrors} V2 write failure(s) this sync — run scripts/reconcile-v2.ts`);
-    }
-    const result = { added: filesAdded, updated: filesUpdated, deleted: toDelete.length, v2WriteErrors };
+    const result = { added: filesAdded, updated: filesUpdated, deleted: toDelete.length };
     await markSyncCompleted(user.userId, result);
     return result;
 
@@ -783,10 +600,6 @@ export async function sync(): Promise<{
   console.log("Sync completed!");
   console.log(`Total: +${totalAdded} added, ~${totalUpdated} updated, -${totalDeleted} deleted`);
   console.log(`Users processed: ${users.length}, Auth failures: ${authFailures}`);
-  const totalV2WriteErrors = getV2WriteErrorCount();
-  if (totalV2WriteErrors > 0) {
-    console.warn(`⚠️  V2 write failures this run: ${totalV2WriteErrors} — affected docs are missing from search until reconciled (scripts/reconcile-v2.ts)`);
-  }
   console.log("========================================");
 
   return {

@@ -1,21 +1,20 @@
-name: V1/V2 reconcile drift check
+name: V2 health check
 
-# Guardrail for the silent dual-write failure mode: sync writes V1 first and
-# swallows V2 errors, and a failed V2 write is not retried until the doc's
-# next Drive edit — while search is SERVED from V2. This dry-run reconcile
-# fails the job on any drift so it gets noticed and healed with --apply.
+# Weekly internal-consistency check of the V2 tables (the only write target
+# since Aug 2026): documents stuck on placeholder timestamps, fully-indexed
+# documents with zero vectors, orphan vectors. Fails the job on any drift.
 #
 # NOTE: GitHub silently disables scheduled workflows after 60 days without
 # repo activity (this killed the old sync cron in May 2026). This check is a
-# secondary guardrail — per-sync V2 write-error counts in the sync-server
-# logs/results are the primary signal.
+# secondary guardrail — sync failures surface as failed file_jobs and failed
+# user_sync_state rows first.
 on:
   schedule:
     - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
 
 jobs:
-  reconcile-check:
+  v2-health-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -27,8 +26,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Reconcile dry run (fails on drift)
+      - name: V2 health check (fails on drift)
         env:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: bun scripts/reconcile-v2.ts --check
+        run: bun scripts/check-v2-health.ts --check

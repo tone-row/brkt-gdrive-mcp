@@ -1,5 +1,5 @@
 /**
- * Integration test for the incremental chunk writer against a real local
+ * Integration test for the incremental vector writer against a real local
  * libsql database. Embeddings are mocked; everything else (SQL, diffing,
  * lazy hash backfill, idempotency) runs for real.
  */
@@ -32,18 +32,17 @@ function para(seed: string): string {
 }
 
 let db: any;
-let syncChunksIncrementally: any;
+let syncVectorsIncrementally: any;
 
 beforeAll(async () => {
   try { unlinkSync(DB_PATH); } catch {}
   ({ db } = await import("../db/client"));
-  ({ syncChunksIncrementally } = await import("./index"));
+  ({ syncVectorsIncrementally } = await import("./v2-store"));
 
   await db.execute(`
-    CREATE TABLE chunks (
+    CREATE TABLE document_vectors (
       id TEXT PRIMARY KEY,
       document_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
       chunk_index INTEGER NOT NULL,
       text TEXT NOT NULL,
       content_hash TEXT,
@@ -54,14 +53,13 @@ beforeAll(async () => {
 
 async function getRows(docId: string) {
   const r = await db.execute({
-    sql: `SELECT id, chunk_index, text, content_hash FROM chunks WHERE document_id = ? ORDER BY chunk_index`,
+    sql: `SELECT id, chunk_index, text, content_hash FROM document_vectors WHERE document_id = ? ORDER BY chunk_index`,
     args: [docId],
   });
   return r.rows;
 }
 
-const DOC = "doc-1";
-const USER = "user-1";
+const DOC = "doc-v2-1";
 const deadline = () => Date.now() + 60_000;
 
 const p1 = para("alpha");
@@ -71,12 +69,13 @@ const p4 = para("delta");
 
 test("initial index embeds everything", async () => {
   embeddedTexts.length = 0;
-  const result = await syncChunksIncrementally(DOC, USER, `${p1}\n\n${p2}\n\n${p3}`, deadline());
+  const result = await syncVectorsIncrementally(DOC, `${p1}\n\n${p2}\n\n${p3}`, deadline());
 
   const rows = await getRows(DOC);
   expect(rows.length).toBe(result.chunks.length);
   expect(rows.length).toBeGreaterThanOrEqual(3);
   expect(embeddedTexts.length).toBe(rows.length);
+  expect(result.embedded).toBe(rows.length);
   expect(result.reused).toBe(0);
   for (const row of rows) expect(row.content_hash).toBeTruthy();
 });
@@ -85,7 +84,7 @@ test("re-run with identical text embeds nothing and changes nothing", async () =
   const before = await getRows(DOC);
   embeddedTexts.length = 0;
 
-  const result = await syncChunksIncrementally(DOC, USER, `${p1}\n\n${p2}\n\n${p3}`, deadline());
+  const result = await syncVectorsIncrementally(DOC, `${p1}\n\n${p2}\n\n${p3}`, deadline());
 
   const after = await getRows(DOC);
   expect(embeddedTexts.length).toBe(0);
@@ -97,7 +96,7 @@ test("append re-embeds only the changed tail, prefix rows untouched", async () =
   const before = await getRows(DOC);
   embeddedTexts.length = 0;
 
-  await syncChunksIncrementally(DOC, USER, `${p1}\n\n${p2}\n\n${p3}\n\n${p4}`, deadline());
+  await syncVectorsIncrementally(DOC, `${p1}\n\n${p2}\n\n${p3}\n\n${p4}`, deadline());
 
   const after = await getRows(DOC);
   expect(after.length).toBeGreaterThan(before.length);
@@ -113,10 +112,10 @@ test("append re-embeds only the changed tail, prefix rows untouched", async () =
 });
 
 test("legacy rows without content_hash are backfilled, not re-embedded", async () => {
-  await db.execute({ sql: `UPDATE chunks SET content_hash = NULL WHERE document_id = ?`, args: [DOC] });
+  await db.execute({ sql: `UPDATE document_vectors SET content_hash = NULL WHERE document_id = ?`, args: [DOC] });
   embeddedTexts.length = 0;
 
-  const result = await syncChunksIncrementally(DOC, USER, `${p1}\n\n${p2}\n\n${p3}\n\n${p4}`, deadline());
+  const result = await syncVectorsIncrementally(DOC, `${p1}\n\n${p2}\n\n${p3}\n\n${p4}`, deadline());
 
   expect(embeddedTexts.length).toBe(0);
   expect(result.reused).toBe(result.chunks.length);
@@ -130,7 +129,7 @@ test("full rewrite replaces all chunks", async () => {
 
   const p5 = para("echo");
   const p6 = para("foxtrot");
-  await syncChunksIncrementally(DOC, USER, `${p5}\n\n${p6}`, deadline());
+  await syncVectorsIncrementally(DOC, `${p5}\n\n${p6}`, deadline());
 
   const after = await getRows(DOC);
   expect(embeddedTexts.length).toBe(after.length);
